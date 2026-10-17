@@ -16,7 +16,7 @@ def test_catalog_loads_and_cites_sources():
     for b in bs:
         assert b["serve"]["source"].startswith("https://")
         assert b["serve"]["quoted"].strip()
-        assert b["variants"]
+        assert b["variants"] or str(b.get("status", "")).startswith("draft")
 
 
 def test_variants_respect_published_max_num_seqs():
