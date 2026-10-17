@@ -143,7 +143,7 @@ def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | N
             response = urllib.request.urlopen(req, timeout=900)
             break
         except urllib.error.HTTPError as exc:
-            if exc.code != 400 or attempt:
+            if exc.code != 400 or attempt or row.get("strict_fixed_length"):
                 raise
             exc.close()
             # Older servers may reject the extra sampling parameters.
@@ -186,6 +186,8 @@ def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | N
 
 
 def run_workload(port: int, model: str, prompts: list[dict], wl: dict) -> dict:
+    if wl.get("strict_fixed_length"):
+        prompts = [{**p, "strict_fixed_length": True} for p in prompts]
     conc = int(wl.get("concurrency", 1))
     max_tokens = int(wl.get("max_tokens", 256))
     chat = wl.get("chat") or None
@@ -215,6 +217,8 @@ def run_workload(port: int, model: str, prompts: list[dict], wl: dict) -> dict:
         [t.join() for t in ts]
     wall = time.perf_counter() - t0
     rs = [r for r in results if r]
+    if wl.get("strict_fixed_length") and len(rs) != len(prompts):
+        raise ValueError("record workload has incomplete requests")
     tok = sum(r["tokens"] for r in rs)
     dec = [(r["tokens"] - 1) / r["decode_s"] for r in rs if r["decode_s"] > 0 and r["tokens"] > 1]
     out = {"n": len(rs), "tokens": tok, "wall_s": round(wall, 3), "output_tok_s": round(tok / wall, 3) if wall else 0,
@@ -642,6 +646,14 @@ def main() -> None:
     work = Path(spec["work_dir"])
     work.mkdir(parents=True, exist_ok=True)
     gpu = gpu_identity()
+    if spec.get("mode") == "record":
+        from forge.tools.recordbench import run_record
+        try:
+            out = run_record(spec, work, gpu)
+        except Exception:
+            out = {"ok": False, "mode": "record", "error": "record measurement failed"}
+        print("BENCH_RESULT " + json.dumps(out), flush=True)
+        return
     if spec.get("mode") == "profile":
         print("BENCH_RESULT " + json.dumps({"ok": True, **run_profile(spec, work, gpu)}), flush=True)
         return
