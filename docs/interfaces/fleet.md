@@ -88,3 +88,17 @@ Vast instances are docker containers (PID 1 is not systemd; Landlock ABI 8 is av
 by `forge.fleet.boxsetup` with nohup: the `forge.sched` daemon (LANDLORD_URL=http://127.0.0.1:7788/mcp through
 landlord's reverse tunnel, building `vast-<instance>`) and the `forge.gate.service`. Recipe files (reasoning-parser
 plugins) are in `$FORGE_ROOT/state/recipe_files/<base_id>/`. Setup progress: `$FORGE_ROOT/state/box_status.json`.
+
+## Version N+1 waves
+
+`forge missions n1 --wave 1 --pairs "<recipe>@<machine>,..." --time-box 45` records the plan. When wave 1 is
+finished, `run-fleet` calls `forge.agents.mechanic.current/propose` on the rig with the wave's mission ids, then
+queues each held-out pair twice (arm `old` with the current playbook, arm `new` with the proposal) on the same
+machine, and when that wave is finished calls `mechanic.compare(old, new, rows)` (which logs promote/reject).
+Log: `<FORGE_STATE>/fleet/waves.jsonl`, plan `<FORGE_STATE>/fleet/n1_plan.json`.
+
+## Dispatch rule: sandbox support
+
+Box setup records `kernel` and `landlock_abi` (machine dict). The controller dispatches to a box only when
+`landlock_abi >= FORGE_MIN_LANDLOCK_ABI` (default 6, what core's sandbox needs for scoping). Vast hosts run their
+own kernels (seen today: 7.0 / ABI 8, 6.8 / ABI 4, 5.15 / ABI 1).
