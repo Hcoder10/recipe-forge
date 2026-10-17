@@ -74,6 +74,12 @@ class Controller:
             raise ValueError(f"{machine} is not set up for {r['base_id']} (has {m.get('recipes')})")
         q = self.queue()
         mid = f"{time.strftime('%m%d-%H%M%S')}-{r['id'].replace(':', '-').replace('.', '-')}-{machine}"[:80]
+        if over.get("arm"):
+            mid += f"-{over['arm']}"
+        taken = {i["mission_id"] for i in q}
+        base, k = mid, 2
+        while mid in taken:
+            mid, k = f"{base}-{k}", k + 1
         item = {"mission_id": mid, "recipe_id": r["id"], "machine": machine, "wave": wave, "playbook": playbook,
                 "status": "queued", "queued_at": now(), **over}
         q.append(item)
