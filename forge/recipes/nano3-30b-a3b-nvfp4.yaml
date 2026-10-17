@@ -30,6 +30,9 @@ serve:
       --reasoning-parser nano_v3 \
       --kv-cache-dtype fp8
   notes: "Card: pip install -U \"vllm>=0.12.0\"; Jetson Thor / DGX Spark: NGC vllm container 25.12.post1-py3. Context 256k in this command; up to 1M with VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 and --max-model-len 1M. Image tag not named by the card (v0.12.0 is the nearest official tag meeting the minimum). Reasoning on by default; enable_thinking=False turns it off."
+published: none
+published_searched: ["https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", "https://research.nvidia.com/labs/nemotron/nemotron-qad/", "https://research.nvidia.com/labs/nemotron/Nemotron-3/", "https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf", "https://developer.nvidia.com/blog/inside-nvidia-nemotron-3-techniques-tools-and-data-that-make-it-efficient-and-accurate/", "https://nvidianews.nvidia.com/news/nvidia-debuts-nemotron-3-family-of-open-models"]
+published_note: "QAD page only states hardware FLOPS ('On Blackwell, NVFP4 enables 4x FLOPS over BF16'), not a measured model throughput. A '4x throughput on B200 vs FP8-H100' NVFP4 claim appears in the vLLM project blog and a dev-forum post, which are not NVIDIA pages, so it is not recorded."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}

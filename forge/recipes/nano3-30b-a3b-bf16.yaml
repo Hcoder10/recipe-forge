@@ -27,6 +27,18 @@ serve:
       --reasoning-parser-plugin nano_v3_reasoning_parser.py \
       --reasoning-parser nano_v3
   notes: "Card: pip install -U \"vllm>=0.12.0\"; Jetson Thor / DGX Spark: NGC vllm container 25.12.post1-py3. Context 256k in this command; up to 1M with VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 and --max-model-len 1M. Image tag not named by the card (v0.12.0 is the nearest official tag meeting the minimum). Reasoning on by default; enable_thinking=False turns it off."
+published:
+  - metric: "relative_speedup"
+    value: 4
+    units: "x token throughput vs Nemotron 2 Nano"
+    gpu: null
+    concurrency: null
+    isl_osl: null
+    engine: null
+    precision: "not stated in source"
+    source: "https://nvidianews.nvidia.com/news/nvidia-debuts-nemotron-3-family-of-open-models"
+    quote: "This design achieves up to 4x higher token throughput compared with Nemotron 2 Nano"
+    note: "Press release (Dec 15 2025) gives no GPU, precision or engine. The tech report's measured 3.3x/2.2x H200 numbers were taken in FP8 and are in nano3-30b-a3b-fp8.yaml."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}

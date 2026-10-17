@@ -43,6 +43,19 @@ serve:
       --reasoning-parser ultra_v3 \
       --speculative-config '{"method":"dflash","model":"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr","num_speculative_tokens":7,"rejection_sample_method":"standard","attention_backend":"FLASHINFER","draft_load_config":{"load_format":"auto"}}'
   notes: "Card: \"This model requires the following vLLM version or newer. Please use this command.\" (docker image nightly-77154ca6...). Quick Start also runs, inside the container, `pip install b12x` and `vllm download-kernels` before serving (needed for --linear-backend b12x / --moe-backend b12x). Card publishes only this drafter (DFlash/LiLiCorr) command; no drafter-free vLLM command is published. Reasoning: enable_thinking True/False; medium effort via {\"enable_thinking\": true, \"medium_effort\": true}."
+published:
+  - metric: "spec_acceptance_length"
+    value: 4.3
+    units: "tokens (mean accepted length)"
+    gpu: null
+    concurrency: null
+    isl_osl: null
+    engine: null
+    spec_decode: "LiLiCorr (DFlash method), draft length 7"
+    source: "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr"
+    quote: "Acceptance length on SPEED-Bench with draft length 7: table row '| **Overall Average** | **4.30** |'"
+    note: "Card: 'Benchmarked with temperature=1.0, top_p=0.95.' and 'These are checkpoint-level acceptance results and are not attributed to a specific serving runtime.'"
+published_note: "No tokens/s number published for Bolt 74B-A9B-24GB: the target card and NVIDIA blog (https://blogs.nvidia.com/blog/nemotron-3-5-super-vl/) make only qualitative speed claims ('much faster than the smartest models')."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}
