@@ -65,3 +65,24 @@ def test_mock_mission_confirm_required(tmp_path):
     assert row["done"]["status"] == "no_win"
     assert row["delta_pct"] == 0.0
     assert any(v["verdict"] == "win" for v in row["gate_verdicts"])
+
+
+def test_compaction_respects_cap(tmp_path):
+    spec = make_spec(tmp_path, team={"workers": 1, "worker": {"context_cap": 12000}})
+    r = MissionRunner(spec, executor=LocalExecutor(tmp_path / "target"), bench=MockBenchRunner(),
+                      gate=MockGate(tmp_path / "gate.jsonl"), mock_llm=MockBrain(), root=tmp_path / "state")
+    w = r.agents["worker-1"]
+    w.add_event_message("TASK from the lead (lane config): x")
+    for i in range(40):
+        w.history.append({"role": "assistant", "content": f"turn {i}", "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {"name": "read", "arguments": "{}"}}]})
+        w.history.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 3000})
+    status = r._status(w)
+    assert w.request_tokens(status) > w.cap
+    w.compact(status)
+    assert w.request_tokens(status) <= w.cap * 0.85
+    assert w.learned and w.history[0]["role"] != "tool"
+    # every tool message still follows its assistant call
+    for i, m in enumerate(w.history):
+        if m["role"] == "tool":
+            assert w.history[i - 1]["role"] in ("assistant", "tool")

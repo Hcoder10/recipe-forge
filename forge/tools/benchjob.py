@@ -80,13 +80,17 @@ def tail(p: Path, n: int) -> str:
         return ""
 
 
-def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: bool) -> dict:
+def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | None) -> dict:
     """One streamed request. Returns tokens, ttft, decode time (first to last token)."""
     if chat:
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
         msgs = row.get("messages") or [{"role": "user", "content": row.get("prompt", "")}]
+        if chat.get("system_prompt") and msgs[0].get("role") != "system":
+            msgs = [{"role": "system", "content": chat["system_prompt"]}] + msgs
         body = {"model": model, "messages": msgs, "max_tokens": row.get("max_tokens", max_tokens),
                 "temperature": 0, "stream": True, "stream_options": {"include_usage": True}}
+        if chat.get("chat_template_kwargs"):
+            body["chat_template_kwargs"] = chat["chat_template_kwargs"]
     else:
         url = f"http://127.0.0.1:{port}/v1/completions"
         body = {"model": model, "prompt": row.get("prompt", ""), "max_tokens": row.get("max_tokens", max_tokens),
@@ -124,7 +128,9 @@ def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: bool) ->
 def run_workload(port: int, model: str, prompts: list[dict], wl: dict) -> dict:
     conc = int(wl.get("concurrency", 1))
     max_tokens = int(wl.get("max_tokens", 256))
-    chat = bool(wl.get("chat", False))
+    chat = wl.get("chat") or None
+    if chat is True:
+        chat = {"on": True}
     # one untimed warmup request (compile/graph capture paths), not counted
     stream_one(port, model, {"prompt": "Hello", "max_tokens": 16}, 16, chat)
     results: list[dict | None] = [None] * len(prompts)
@@ -171,7 +177,8 @@ def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: st
     log_path = work / f"server-{label}.log"
     t0 = time.time()
     with open(log_path, "w") as log:
-        proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                cwd=spec.get("serve_cwd") or None)
     try:
         wait_ready(port, proc, float(spec.get("startup_timeout_s", 900)), log_path)
         startup = time.time() - t0

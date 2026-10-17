@@ -73,21 +73,19 @@ class Agent:
         keep_turns = int(self.r.playbook["knobs"].get("keep_turns", 12))
         budget = int(self.cap * 0.85)
         starts = [i for i in self._turn_starts() if i > 0]
-        # choose the earliest cut that brings the request under ~60% of the cap, keeping >= keep_turns turns
-        # where possible
+        # Compact a chunk: cut at the latest turn start that still keeps keep_turns assistant turns, unless
+        # even that tail does not fit under ~60% of the cap, then cut later (the cap is a hard limit).
         assistant_idx = [i for i, m in enumerate(self.history) if m["role"] == "assistant"]
-        min_keep_from = assistant_idx[-keep_turns] if len(assistant_idx) > keep_turns else 0
-        cut = None
-        for i in starts:
+        keep_from = assistant_idx[-keep_turns] if len(assistant_idx) > keep_turns else 0
+        cands = [i for i in starts if i <= keep_from] or starts[:1]
+        cut = cands[-1] if cands else len(self.history)
+        for i in [s for s in starts if s >= cut]:
             tail = sum(est_tokens(m) for m in self.history[i:])
             if self.fixed_tokens + est_tokens(self.context_msg) + tail + est_tokens(status) < budget * 0.7:
                 cut = i
                 break
-        if cut is None:
+        else:
             cut = starts[-1] if starts else len(self.history)
-        if min_keep_from and cut > min_keep_from:
-            # keeping keep_turns would not fit: keep fewer (the cap is a hard limit)
-            pass
         old, self.history = self.history[:cut], self.history[cut:]
         while self.history and self.history[0]["role"] == "tool":
             old.append(self.history.pop(0))

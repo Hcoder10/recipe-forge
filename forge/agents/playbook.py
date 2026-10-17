@@ -73,7 +73,7 @@ def save(pb: dict, root: Path) -> str:
 
 
 def load(h: str | None, root: Path) -> dict:
-    if not h or h in ("base", "default"):
+    if not h or h in ("base", "default") or h == content_hash(DEFAULT):
         return {**DEFAULT, "hash": content_hash(DEFAULT)}
     p = Path(root) / f"{h}.json"
     if not p.exists():

@@ -309,7 +309,9 @@ class MissionRunner:
         self.wakers: dict[str, threading.Event] = {}
         self.team_cfg = TeamConfig.from_dict(spec.get("team"))
         self.playbook = pb_mod.load(spec.get("playbook"), self.root / "playbooks")
-        recipe = spec["recipe"]
+        recipe = normalize_recipe(spec["recipe"], spec.get("variant"), spec.get("bench_prompts"))
+        if spec.get("recipe_id"):
+            recipe["id"] = spec["recipe_id"]
         machine = spec["machine"] if isinstance(spec["machine"], dict) else {"name": spec["machine"]}
         self.executor = executor or self._default_executor(machine)
 
@@ -591,6 +593,32 @@ class MissionRunner:
             "playbook": self.playbook.get("hash"), "ended": self.end_reason, "errors": self.errors[:10],
             "detector": dict(self.detector.counts), "minutes": round((time.time() - m.t_start) / 60, 1),
         }
+
+
+def normalize_recipe(recipe: dict, variant: str | None = None, bench_prompts: str | None = None) -> dict:
+    """Catalog recipe (forge/recipes/*.yaml) -> the shape the runner uses: serve.env merged from vllm.env,
+    one workload picked from variants, chat settings folded into the workload, id suffixed with the variant."""
+    r = dict(recipe)
+    serve = dict(r.get("serve") or {})
+    serve["env"] = {**((r.get("vllm") or {}).get("env") or {}), **(serve.get("env") or {})}
+    r["serve"] = serve
+    wl = dict(r.get("workload") or {})
+    variants = r.get("variants") or []
+    if not wl and variants:
+        v = next((x for x in variants if x.get("name") == variant), None) if variant else variants[0]
+        if v is None:
+            raise ValueError(f"recipe {r.get('id')} has no variant {variant!r}")
+        wl = dict(v)
+        r["id"] = f"{r['id']}:{v['name']}"
+    chat = r.get("chat")
+    if chat and "chat" not in wl:
+        wl["chat"] = {"system_prompt": chat.get("system_prompt"),
+                      "chat_template_kwargs": chat.get("chat_template_kwargs") or {}}
+    if bench_prompts:
+        wl["bench_prompts"] = bench_prompts
+    wl.setdefault("metric", "decode_tok_s" if int(wl.get("concurrency", 1)) <= 1 else "output_tok_s")
+    r["workload"] = wl
+    return r
 
 
 def _site_packages(executor, python: str) -> str:
