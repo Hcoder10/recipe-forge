@@ -72,7 +72,7 @@ class Controller:
         if r["base_id"] not in (m.get("recipes") or []):
             raise ValueError(f"{machine} is not set up for {r['base_id']} (has {m.get('recipes')})")
         q = self.queue()
-        mid = f"{time.strftime('%m%d-%H%M%S')}-{r['id'].replace('.', '-')}-{machine}"[:80]
+        mid = f"{time.strftime('%m%d-%H%M%S')}-{r['id'].replace(':', '-').replace('.', '-')}-{machine}"[:80]
         item = {"mission_id": mid, "recipe_id": r["id"], "machine": machine, "wave": wave, "playbook": playbook,
                 "status": "queued", "queued_at": now(), **over}
         q.append(item)

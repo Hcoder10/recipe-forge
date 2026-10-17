@@ -1,7 +1,7 @@
 """Prove a machine runs a recipe: start NVIDIA's published server, wait for health, send one chat request,
 stop. Runs ON the target inside a GPU grant (the executor wraps it in forge.fleet.gpujob):
 
-    python -m forge.fleet.recipecheck --recipe nano-9b-v2.c1 --gpu-class rtx5090_32g
+    python -m forge.fleet.recipecheck --recipe nano-9b-v2:c1 --gpu-class rtx5090_32g
 
 Prints `RECIPE_CHECK {json}`: ok, startup_s, completion_tokens, wall_s, error. Server log in
 $FORGE_ROOT/state/recipecheck/<recipe>.log.
@@ -49,7 +49,7 @@ def main(argv=None) -> int:
     os.makedirs(cwd, exist_ok=True)
     logd = os.path.join(ROOT, "state", "recipecheck")
     os.makedirs(logd, exist_ok=True)
-    logp = os.path.join(logd, f"{r['id']}.log")
+    logp = os.path.join(logd, f"{r['id'].replace(':', '-')}.log")
     vllm = os.path.join(os.path.dirname(a.python), "vllm")
     argv_ = [vllm if os.path.exists(vllm) else "vllm", "serve", r["model"], *r["serve"]["args"],
              "--host", "127.0.0.1", "--port", str(port)]

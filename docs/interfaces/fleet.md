@@ -13,9 +13,9 @@ the published command to load on that GPU class; it applies to the baseline and 
 
 ```python
 from forge.recipes import load_all, get, fits, load_prompts
-get("nano-9b-v2.c8", gpu_class="rtx5090_32g") -> dict
+get("nano-9b-v2:c8", gpu_class="rtx5090_32g") -> dict
 ```
-Expanded recipe keys: `id` (`<base>.<variant>`), `base_id`, `variant`, `model`, `drafter`, `serve {args,
+Expanded recipe keys: `id` (`<base>:<variant>`), `base_id`, `variant`, `model`, `drafter`, `serve {args,
 published_args, env, adapted, served_model_name?, source, quoted}`, `workload {concurrency, max_tokens: 512,
 temperature: 0, metric: decode_tok_s|output_tok_s, bench_prompts, chat}`, `hardware`, `gpu_class`,
 `recipe_sha256`.

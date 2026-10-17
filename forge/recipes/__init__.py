@@ -1,12 +1,12 @@
 """Recipe catalog: NVIDIA's published vLLM serve recipes for Nemotron models, one YAML per recipe.
 
 Each YAML is a *base* recipe (model + NVIDIA's exact serve args + source). Its `variants` expand it into
-the runnable recipes the fleet schedules, with ids like `nano-9b-v2.c8`:
+the runnable recipes the fleet schedules, with ids like `nano-9b-v2:c8`:
 
     from forge.recipes import load_all, get
     for r in load_all():                 # expanded variants, sorted by id
         print(r["id"], r["workload"]["concurrency"], r["hardware"]["fits"])
-    r = get("bolt-74b-lilicorr.c1", gpu_class="rtxpro6000_95g")
+    r = get("bolt-74b-lilicorr:c1", gpu_class="rtxpro6000_95g")
 
 An expanded recipe is a plain dict (JSON-able) with the base fields plus:
     base_id, variant, workload {concurrency, max_tokens, temperature, metric, bench_prompts, chat},
@@ -68,7 +68,7 @@ def expand(base: dict, gpu_class: str | None = None) -> list[dict]:
         r = copy.deepcopy(base)
         r.pop("variants")
         r["base_id"] = base["id"]
-        r["id"] = f"{base['id']}.{v['name']}"
+        r["id"] = f"{base['id']}:{v['name']}"
         r["variant"] = v["name"]
         r["workload"] = {
             "concurrency": int(v["concurrency"]),
@@ -115,7 +115,8 @@ def load_all(gpu_class: str | None = None, runnable_only: bool = False) -> list[
 
 
 def get(recipe_id: str, gpu_class: str | None = None) -> dict:
-    base_id = recipe_id.split(".", 1)[0]
+    recipe_id = recipe_id.replace(".", ":", 1) if ":" not in recipe_id and "." in recipe_id else recipe_id
+    base_id = recipe_id.split(":", 1)[0]
     path = os.path.join(HERE, base_id + ".yaml")
     if not os.path.exists(path):
         raise KeyError(f"no recipe {base_id!r}; known: {[b['id'] for b in bases()]}")

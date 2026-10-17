@@ -171,6 +171,27 @@ def main(argv=None) -> int:
         raise RuntimeError("scheduler daemon did not answer within 60 s (see state/logs/sched.log)")
 
     step(st, "sched", sched)
+
+    def gate_service():
+        env = {**os.environ, "FORGE_ROOT": ROOT, "PYTHONPATH": ROOT, "LANDLORD_URL": plan["landlord_url"]}
+        if not os.path.exists(os.path.join(ROOT, "gate", "locks", "main.json")):
+            out = subprocess.run([sys.executable, "-m", "forge.gate.lock", "write", "--name", "main"], env=env,
+                                 cwd=ROOT, capture_output=True, text=True, timeout=300)
+            if out.returncode != 0:
+                raise RuntimeError(f"gate lock: {(out.stdout + out.stderr)[-500:]}")
+        ps = subprocess.run(["bash", "-c", "pgrep -f '[f]orge.gate.service' || true"], capture_output=True, text=True)
+        if ps.stdout.strip():
+            return {"already": ps.stdout.split()}
+        lf = open(os.path.join(STATE, "logs", "gate.log"), "ab")
+        p = subprocess.Popen([sys.executable, "-m", "forge.gate.service"], env=env, stdout=lf, stderr=lf,
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd=ROOT)
+        time.sleep(5)
+        if p.poll() is not None:
+            raise RuntimeError(f"gate service exited rc={p.returncode} (see state/logs/gate.log)")
+        return {"pid": p.pid}
+
+    if plan.get("gate", True):
+        step(st, "gate_service", gate_service)
     st["ready"] = True
     st["ready_at"] = time.time()
     st["current"] = None
