@@ -38,6 +38,17 @@ playbook, ended, errors[], detector{signal: count}, minutes}`.
 `baseline` is the quick-bench reference value; `best`/`delta_pct` come only from the gate ledger (0 if no win).
 `forge.agents.mission.audit_mission(mission_id, gate)` re-audits later when gates were still open.
 
+Spec from the catalog (on the rig): `python -m forge.agents mission --recipe bolt-74b-lilicorr.c1 --machine rig
+--minutes 45 --budget 6 --workers 2 --id <mid> --out state/specs/<mid>.json`; or detached in one go:
+`bash scripts/agents/launch_mission.sh <recipe> <mission_id> [minutes] [budget] [workers]` (log in
+`state/<mid>.out`). Stop a mission with SIGTERM/SIGINT: it ends cleanly and still writes `row.json`.
+Other commands: `probe` (Crusoe ids, tool calls, caching), `selftest` (mock mission, no GPU, no network),
+`answer <mission> <question_id> <text>` (human inbox).
+
+Models (Crusoe serves no Nemotron Ultra): all roles default to `nvidia/NVIDIA-Nemotron-3.5-Super-VL` with
+automatic fallback to `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B` (see `forge/agents/config.py`; overridable with
+`FORGE_ULTRA_MODEL` / `FORGE_SUPER_MODEL`). Prices per model id from Crusoe's `/v1/models`.
+
 ## Files per mission (for dash): `<FORGE_STATE>/missions/<id>/`
 
 All append-only JSONL, one object per line, each with `t` (unix seconds).
