@@ -7,6 +7,7 @@ from __future__ import annotations
 import difflib
 import json
 import posixpath
+import shlex
 import time
 
 from forge.tools.bundle import canon, hash_files, normalize_delta
@@ -457,9 +458,24 @@ def t_kernel_test(ctx, path, args="", vram_gb=8, timeout_s=600):
     if kind != "ws":
         raise ToolError("kernel_test runs a workspace script")
     m = ctx.mission
-    cmd = f"cd {m.ws} && {m.python} {ap} {args}"
-    r = ctx.executor.run(cmd, timeout_s=min(1800, int(timeout_s)), kind="bench", vram_gb=float(vram_gb), gpus=1,
-                         mission_id=m.id, label="kernel_test")
+    timeout_s = min(1800, int(timeout_s))
+    argv = [m.python, ap] + shlex.split(args or "")
+    if getattr(m, "sandbox_tools", False):
+        # agent code on a GPU: inside forge.sandbox, granted only the scheduler's GPU
+        venv = posixpath.dirname(posixpath.dirname(m.python))
+        wrap = [m.python, "-m", "forge.tools.sbxrun", "--ws", m.ws, "--venv", venv, "--timeout", str(timeout_s),
+                "--gpus-from-env"]
+        for ro in [m.hf_home, *m.readable_roots]:
+            if ro:
+                wrap += ["--ro", ro]
+        r = ctx.executor.run(wrap + ["--"] + argv, cwd=m.forge_root, env={"PYTHONPATH": m.forge_root},
+                             timeout_s=timeout_s + 60, kind="work", vram_gb=float(vram_gb), gpus=1,
+                             mission_id=m.id, label="kernel_test")
+        if r.rc == 199 and "FORGE_INFRA" in (r.stderr or ""):
+            r.infra_error = r.stderr.strip().splitlines()[-1][:300]
+    else:
+        r = ctx.executor.run(argv, cwd=m.ws, timeout_s=timeout_s, kind="work", vram_gb=float(vram_gb), gpus=1,
+                             mission_id=m.id, label="kernel_test")
     if r.infra_error:
         raise EnvBlocked(f"kernel_test could not run: {r.infra_error}")
     return {"rc": r.rc, "stdout": r.stdout[-3000:], "stderr": r.stderr[-1500:], "elapsed_s": round(r.elapsed_s, 1)}

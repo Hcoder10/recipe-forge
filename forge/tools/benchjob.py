@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import signal
 import socket
@@ -30,12 +31,44 @@ from forge.tools.bundle import canon, serve_command
 def gpu_identity() -> dict:
     vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
     try:
-        out = subprocess.run(["nvidia-smi", f"--id={vis}", "--query-gpu=uuid,name,power.limit",
+        out = subprocess.run(["nvidia-smi", f"--id={vis}", "--query-gpu=index,uuid,name,power.limit",
                               "--format=csv,noheader"], capture_output=True, text=True, timeout=30).stdout
-        uuid, name, power = [x.strip() for x in out.strip().splitlines()[0].split(",")]
-        return {"uuid": uuid, "name": name, "power_limit": power}
+        index, uuid, name, power = [x.strip() for x in out.strip().splitlines()[0].split(",")]
+        return {"index": index, "uuid": uuid, "name": name, "power_limit": power}
     except Exception:
-        return {"uuid": f"unknown-{vis}", "name": "unknown", "power_limit": ""}
+        return {"index": vis if vis.isdigit() else None, "uuid": f"unknown-{vis}",
+                "name": "unknown", "power_limit": ""}
+
+
+def confirmation_threshold(value=None) -> float:
+    value = float(value if value is not None else os.environ.get("FORGE_BENCH_CONFIRM_PCT", "2.0"))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("confirm_pct must be finite and nonnegative")
+    return value
+
+
+def same_gpu(reference: dict, current: dict) -> bool:
+    index = reference.get("index")
+    uuid = reference.get("uuid")
+    return ((index is not None and current.get("index") is not None
+             and str(index) == str(current["index"])) or
+            (bool(uuid) and not uuid.startswith("unknown-") and uuid == current.get("uuid")))
+
+
+def comparison(reference: float, candidate: float, fresh: float | None = None) -> dict:
+    delta = 100.0 * (candidate - reference) / reference if reference else None
+    out = {}
+    noise = 0.0
+    if fresh is not None:
+        noise = 100.0 * abs(reference - fresh) / fresh if fresh else None
+        baseline = (reference + fresh) / 2 if noise is not None and noise <= 2.0 else fresh
+        out.update(confirmed=True, delta_pct_vs_cached=round(delta, 3) if delta is not None else None,
+                   noise_pct=round(noise, 3) if noise is not None else None)
+        delta = 100.0 * (candidate - baseline) / baseline if baseline else None
+    out["delta_pct"] = round(delta, 3) if delta is not None else None
+    out["verdict_hint"] = (None if delta is None else "within_noise" if abs(delta) < max(noise or 0, 1.0)
+                           else "gain" if delta > 0 else "loss")
+    return out
 
 
 def free_port() -> int:
@@ -333,6 +366,7 @@ def main() -> None:
     gpu = gpu_identity()
     out: dict = {"gpu": gpu}
     try:
+        confirm_pct = confirmation_threshold(spec.get("confirm_pct"))
         prompts_hash = hashlib.sha256(Path(spec["prompts"]).read_bytes()).hexdigest()[:16]
         key = hashlib.sha256(canon({"gpu": gpu["uuid"], "recipe": spec["recipe"], "prompts": prompts_hash,
                                     "n": spec.get("n_prompts"), "wl": spec["workload"],
@@ -342,7 +376,9 @@ def main() -> None:
         out["ref_key"] = key
         cached = json.loads(cache.read_text()) if cache.exists() else None
         max_age = float(spec.get("ref_max_age_s", 1800))
-        if cached and not spec.get("fresh_reference") and time.time() - cached.get("measured_at", 0) < max_age:
+        if (cached and not spec.get("fresh_reference")
+                and same_gpu(cached.get("gpu") or {}, gpu)
+                and time.time() - cached.get("measured_at", 0) < max_age):
             out["reference"] = cached
             out["reference_cached"] = True
         else:
@@ -352,17 +388,30 @@ def main() -> None:
                 out["infra"] = True     # the unmodified published recipe failed: not the agent's doing
                 raise
             out["reference"]["measured_at"] = time.time()
+            out["reference"]["gpu"] = gpu
             if cached:   # the previous reference on this GPU: a run-to-run noise sample for the agents
                 out["previous_reference_value"] = cached.get("value")
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps(out["reference"]))
             out["reference_cached"] = False
+        out["reference_age_s"] = max(0.0, time.time() - out["reference"]["measured_at"])
+        out["reference_gpu"] = out["reference"]["gpu"]
         if spec.get("candidate") is not None:
             c = spec["candidate"]
             out["candidate"] = serve_and_measure(spec, c.get("bundle_dir"), c.get("config_delta"),
                                                  c.get("env"), "cand", work)
             r, v = out["reference"]["value"], out["candidate"]["value"]
-            out["delta_pct"] = round(100.0 * (v - r) / r, 3) if r else None
+            out.update(comparison(r, v))
+            if out["reference_cached"] and r and abs(100.0 * (v - r) / r) >= confirm_pct:
+                try:
+                    fresh = serve_and_measure(spec, None, None, None, "ref-confirm", work)
+                except Exception:
+                    out["infra"] = True
+                    raise
+                fresh.update(measured_at=time.time(), gpu=gpu)
+                out["reference_fresh"] = fresh
+                out.update(comparison(r, v, fresh["value"]))
+                cache.write_text(json.dumps(fresh))
         out["ok"] = True
     except Exception as e:  # report one line; the tool layer classifies it
         out["ok"] = False

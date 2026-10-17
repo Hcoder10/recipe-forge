@@ -9,6 +9,7 @@ import time
 from pathlib import PurePosixPath
 
 from forge.tools.bundle import canon
+from forge.tools.benchjob import confirmation_threshold
 from forge.tools.registry import EnvBlocked, ToolError
 
 
@@ -23,7 +24,7 @@ class RemoteBenchRunner:
         self.timeout_s = timeout_s
 
     def run(self, mission, *, config_delta=None, env=None, bundle_dir=None, n_prompts=None,
-            fresh_reference=False, label="bench") -> dict:
+            fresh_reference=False, label="bench", confirm_pct=None) -> dict:
         ws = self.ex.workspace(mission.id)
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (label or "bench"))[:24]
         stamp = f"{safe}-{int(time.time() * 1000)}"
@@ -37,6 +38,7 @@ class RemoteBenchRunner:
             "ref_cache_dir": str(PurePosixPath(self.forge_root) / "state" / "refcache"),
             "cache_dir": str(PurePosixPath(self.forge_root) / "state" / "benchcache"),
             "work_dir": work, "fresh_reference": fresh_reference,
+            "confirm_pct": confirmation_threshold(confirm_pct),
             "serve_cwd": getattr(mission, "serve_cwd", None), "sandbox": self.sandbox,
             "hf_home": getattr(mission, "hf_home", None),
             "candidate": None if (config_delta is None and bundle_dir is None and env is None)
@@ -83,7 +85,7 @@ class MockBenchRunner:
         return -0.06 + 0.14 * h
 
     def run(self, mission, *, config_delta=None, env=None, bundle_dir=None, n_prompts=None,
-            fresh_reference=False, label="bench") -> dict:
+            fresh_reference=False, label="bench", confirm_pct=None) -> dict:
         self.calls.append({"config_delta": config_delta, "env": env, "bundle_dir": bundle_dir})
         metric = mission.recipe["workload"].get("metric", "decode_tok_s")
         ref = self.base * (1 + self.rng.gauss(0, self.noise))
