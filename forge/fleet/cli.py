@@ -96,7 +96,7 @@ def deploy(m: dict) -> None:
     root = m["forge_root"]
     n = ex.put_tree(prov.REPO, root, excludes=("__pycache__", ".git", "state", "results", "*.pyc", "runs", ".claude"))
     # verify: every .py file on the target matches the bytes that were sent
-    local = {k: v for k, v in ex.last_manifest.items() if k.endswith(".py")}
+    local = {k: v for k, v in ex.last_manifest.items() if k.endswith(".py") and k.startswith(("forge/", "bin/"))}
     r = ex.sh(f"cd {root} && find forge bin -name '*.py' -not -path '*/__pycache__/*' -exec md5sum {{}} +", timeout_s=120)
     remote = {line.split()[1]: line.split()[0] for line in r.stdout.splitlines() if len(line.split()) == 2}
     bad = [k for k, v in local.items() if remote.get(k) != v]
@@ -111,10 +111,14 @@ def deploy(m: dict) -> None:
         ex.sh(f"cd {root} && FORGE_ROOT={root} PYTHONPATH={root} {m.get('sched_python') or m['python']} -c "
               f"{_sq(code)} {_sq(json.dumps(machine_json(m)))}")
         # the machine registry (boxes) so the mission runner on the rig can reach them
-        for name, mm_ in all_machines(include_retired=True).items():
-            if mm_.get("kind") == "vast":
-                ex.write_text(f"{root}/state/fleet/machines/{name}.json", json.dumps(mm_, indent=1))
+        sync_registry(ex, root)
     print(f"{m['name']}: deployed {n / 1e6:.2f} MB to {root}, {len(local)} .py files verified")
+
+
+def sync_registry(ex, root: str) -> None:
+    """Copy the box registry to a machine in one transfer (one ssh call)."""
+    from forge.fleet.machines import dynamic_dir
+    ex.put_tree(dynamic_dir(), f"{root}/state/fleet/machines", excludes=("*.tmp",))
 
 
 def _sq(s: str) -> str:
@@ -248,6 +252,7 @@ def cmd_run_fleet(a) -> int:
     while True:
         try:
             boxes(provision=True)
+            sync_registry(c.rig, get_machine("rig")["forge_root"])
             started = c.dispatch()
             finished = c.monitor()
             c.snapshot()
