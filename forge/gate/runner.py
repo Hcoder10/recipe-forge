@@ -39,6 +39,7 @@ class Workload:
 
 class GateInvalid(Exception):
     """The run cannot be judged (machine not quiet, server failed, counts disagree...)."""
+    servers: list = []
 
 
 def _ids_from_tokens(tokens: list[str]) -> list[int]:
@@ -47,6 +48,9 @@ def _ids_from_tokens(tokens: list[str]) -> list[int]:
 
 def timed_pass(server, model: str, prompts: list[list[int]], wl: Workload, retok) -> dict:
     """One pass, every prompt once. Returns per-request outputs and the metric."""
+    for p in prompts:
+        if not p or not all(isinstance(t, int) for t in p):
+            raise GateInvalid("internal: prompts must be token id lists")
     results: list[dict | None] = [None] * len(prompts)
     errors: list[str] = []
     idx = iter(range(len(prompts)))
@@ -190,10 +194,13 @@ def run(kind: str, slices, wl: Workload, reps: int, ctx: RunCtx, confirm_index: 
                 got[pos] = res
                 meta.update({"value": res["value"], "tokens": res["tokens"], "usage_tokens": res["usage_tokens"],
                              "wall_s": round(res["wall_s"], 3)})
-            except GateInvalid:
+            except GateInvalid as e:
+                e.servers = servers_meta
                 raise
             except Exception as e:
-                raise GateInvalid(f"server {name} ({side}) failed: {type(e).__name__}: {str(e)[:300]}") from e
+                err = GateInvalid(f"server {name} ({side}) failed: {type(e).__name__}: {str(e)[:300]}")
+                err.servers = servers_meta
+                raise err from e
             finally:
                 meta["log_tail"] = srv.log_tail(64 * 1024)
                 srv.stop()

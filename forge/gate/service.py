@@ -111,9 +111,10 @@ class RealCtx:
     def chat_ids(self, messages: list[dict]) -> list[int]:
         msgs = ([{"role": "system", "content": self.system}] if self.system else []) + messages
         ids = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, **self.chat_kwargs)
-        if isinstance(ids, dict):
+        if not isinstance(ids, list):           # BatchEncoding (a Mapping) in newer transformers
             ids = ids["input_ids"]
-        return list(ids)
+        ids = [int(t) for t in ids]
+        return ids
 
     def retok(self, text: str) -> list[int]:
         return self.tok.encode(text, add_special_tokens=False)
@@ -236,6 +237,7 @@ def run_one(req: dict, grant, log=print, ctx_factory=RealCtx) -> dict:
         v.update(res)
     except runner.GateInvalid as e:
         v["verdict"], v["detail"] = "invalid", str(e)[:500]
+        v["servers"] = list(getattr(e, "servers", []) or [])
     except Exception as e:  # infra/tool bug: never a win
         v["verdict"], v["detail"] = "error", f"{type(e).__name__}: {str(e)[:400]}"
         v["traceback"] = traceback.format_exc()[-4000:]

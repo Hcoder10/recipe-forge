@@ -20,8 +20,12 @@ def http_json(url: str, body: dict | None = None, timeout: float = 600.0) -> dic
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"},
                                  method="POST" if data else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read() or b"{}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:600]
+        raise ServerError(f"HTTP {e.code} from {url.rsplit('/', 2)[-1]}: {body}") from None
 
 
 class GateServer:
