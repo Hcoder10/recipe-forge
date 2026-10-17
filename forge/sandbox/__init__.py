@@ -3,6 +3,9 @@
 FORGE_SANDBOX_NO_SYSTEMD=1 forces the fallback. Otherwise availability is cached
 per process. The fallback adopts orphaned descendants and tracks /proc identities
 and a job environment token; it does not provide systemd's MemoryMax accounting.
+FORGE_SANDBOX_MIN_ABI defaults to 1. Unsupported Landlock rights are omitted;
+FORGE_SANDBOX_ALLOW_NONE=1 explicitly permits kernels without Landlock.
+job.sandbox_level and <job_dir>/sandbox_level.json report the applied restrictions.
 
     from forge.sandbox import Spec, launch
     job = launch(Spec(cmd=["python", "x.py"], job_dir="/home/cube/forge/jobs/j1",
@@ -165,6 +168,7 @@ class Job:
         self.started = time.time()
         self.returncode: int | None = None
         self.containment = "systemd-scope"
+        self.sandbox_level: dict | None = None
         self.survivors: list[int] = []
         self._report_path: str | None = None
 
@@ -266,8 +270,12 @@ def _user_bus_env() -> dict[str, str]:
 def launch(spec: Spec) -> Job:
     """Start spec.cmd sandboxed with automatic containment selection."""
     global _systemd_available
-    if landlock.abi_version() < 6:
-        raise SandboxError("Landlock ABI >= 6 required (scoping)")
+    min_abi = int(os.environ.get("FORGE_SANDBOX_MIN_ABI", "1"))
+    allow_none = os.environ.get("FORGE_SANDBOX_ALLOW_NONE") == "1"
+    try:
+        landlock.checked_abi(min_abi, allow_none)
+    except landlock.LandlockUnavailable as exc:
+        raise SandboxError(str(exc)) from exc
     jd = _norm(spec.job_dir)
     for d in ("home", "tmp", "ws"):
         os.makedirs(os.path.join(jd, d), mode=0o700, exist_ok=True)
@@ -276,7 +284,11 @@ def launch(spec: Spec) -> Job:
     env["FORGE_JOB_TOKEN"] = uuid.uuid4().hex
     unit = "forge-" + (spec.name or uuid.uuid4().hex[:12])
     payload = {"cmd": spec.cmd, "env": env, "cwd": _norm(spec.cwd) if spec.cwd else os.path.join(jd, "ws"),
-               "cpus": spec.cpus, "paths": rules, **net, "scope": True, "unit": unit}
+               "cpus": spec.cpus, "paths": rules, **net, "scope": True, "unit": unit,
+               "min_abi": min_abi, "allow_none": allow_none}
+    level_path = os.path.join(jd, "sandbox_level.json")
+    if os.path.exists(level_path):
+        os.unlink(level_path)
     spec_path = os.path.join(jd, "spec.json")
     with open(spec_path, "w") as f:
         json.dump(payload, f, indent=1)
@@ -285,7 +297,7 @@ def launch(spec: Spec) -> Job:
     pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     entry = [sys.executable, "-I", "-c",
              f"import sys; sys.path.insert(0, {pkg_parent!r}); from forge.sandbox.enter import run; "
-             f"run({spec_path!r})"]
+             f"run({spec_path!r}, containment='pgroup')"]
     use_systemd = _use_systemd()
     # A readiness file distinguishes a scope launch failure from a job failure.
     ready = os.path.join(jd, ".started-" + uuid.uuid4().hex)
@@ -334,4 +346,15 @@ def launch(spec: Spec) -> Job:
     if not use_systemd:
         job.containment = "pgroup-fallback"
         job._report_path = report_path
+    deadline = time.monotonic() + 15
+    while True:
+        try:
+            with open(level_path) as f:
+                job.sandbox_level = json.load(f)
+            break
+        except (FileNotFoundError, json.JSONDecodeError):
+            if proc.poll() is not None or time.monotonic() >= deadline:
+                job.stop(grace=0)
+                raise SandboxError("sandbox entry failed to report its level; see " + log_path)
+            time.sleep(0.01)
     return job

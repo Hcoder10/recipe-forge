@@ -6,6 +6,7 @@ child right before exec (forge.sandbox.enter does this).
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import platform
 
@@ -79,10 +80,14 @@ def abi_version() -> int:
         return 0
     libc = _libc()
     v = libc.syscall(SYS_CREATE_RULESET, None, ctypes.c_size_t(0), ctypes.c_uint32(CREATE_RULESET_VERSION))
+    if v < 0 and ctypes.get_errno() not in (errno.ENOSYS, errno.EOPNOTSUPP):
+        raise OSError(ctypes.get_errno(), "landlock ABI probe")
     return v if v > 0 else 0
 
 
 def fs_mask(abi: int) -> int:
+    if abi < 1:
+        return 0
     m = (1 << 13) - 1
     if abi >= 2:
         m |= REFER
@@ -93,16 +98,41 @@ def fs_mask(abi: int) -> int:
     return m
 
 
+def checked_abi(min_abi: int | None = None, allow_none: bool | None = None) -> int:
+    """Probe and enforce the operator's policy, including in the entry process."""
+    if min_abi is None:
+        min_abi = int(os.environ.get("FORGE_SANDBOX_MIN_ABI", "1"))
+    if min_abi < 1:
+        raise ValueError("FORGE_SANDBOX_MIN_ABI must be at least 1")
+    if allow_none is None:
+        allow_none = os.environ.get("FORGE_SANDBOX_ALLOW_NONE") == "1"
+    try:
+        abi = abi_version()
+    except OSError as exc:
+        if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
+            raise
+        abi = 0
+    if abi < 1:
+        if allow_none:
+            return 0
+        raise LandlockUnavailable("Landlock is not available on this kernel")
+    if abi < min_abi:
+        raise LandlockUnavailable(f"Landlock ABI >= {min_abi} required (found {abi})")
+    return abi
+
+
 def apply(paths: list[tuple[str, int]], bind_ports: list[int] | None, connect_ports: list[int] | None,
-          scope: bool = True) -> int:
+          scope: bool = True, *, min_abi: int | None = None, allow_none: bool | None = None) -> int:
     """Restrict the calling process (and its future children) for good.
 
     paths: (path, rights) pairs; missing paths are skipped. bind_ports/connect_ports: None leaves
-    that direction unrestricted, a list allows only those TCP ports. Returns the ABI used.
+    that direction unrestricted, a list allows only those TCP ports on ABI >= 4.
+    Older ABIs omit unsupported rights and network rules. Returns the ABI used
+    (0 only with explicit allow_none opt-in).
     """
-    abi = abi_version()
-    if abi < 1:
-        raise LandlockUnavailable("Landlock is not available on this kernel")
+    abi = checked_abi(min_abi, allow_none)
+    if abi == 0:
+        return 0
     libc = _libc()
     handled_fs = fs_mask(abi)
     handled_net = 0
@@ -111,8 +141,6 @@ def apply(paths: list[tuple[str, int]], bind_ports: list[int] | None, connect_po
             handled_net |= NET_BIND_TCP
         if connect_ports is not None:
             handled_net |= NET_CONNECT_TCP
-    elif bind_ports is not None or connect_ports is not None:
-        raise LandlockUnavailable(f"Landlock ABI {abi} has no network rules")
     scoped = (SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL) if (scope and abi >= 6) else 0
     attr = _RulesetAttr(handled_fs, handled_net, scoped)
     size = ctypes.sizeof(_RulesetAttr) if abi >= 6 else (16 if abi >= 4 else 8)
@@ -138,7 +166,7 @@ def apply(paths: list[tuple[str, int]], bind_ports: list[int] | None, connect_po
             finally:
                 os.close(pfd)
         for ports, right in ((bind_ports, NET_BIND_TCP), (connect_ports, NET_CONNECT_TCP)):
-            if ports is None:
+            if ports is None or not (handled_net & right):
                 continue
             for p in sorted(set(ports)):
                 np_ = _NetPort(right, p)
