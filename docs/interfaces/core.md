@@ -91,4 +91,28 @@ becomes true on the candidate row when it passes. `recipe_id` is `<recipe>` or `
 `serve_command`).
 
 The gate service runs as `python -m forge.gate.service ensure` (unit `forge-gate`). Rows are agent-safe:
-no prompts, no server logs.
+no prompts, no server logs. `python -m forge.gate.service once <gate_id>` runs one queued request in the
+foreground (rehearsals). `gate.reference(recipe_id, reps=4)` queues a reference control by hand; the service
+also queues them itself until a recipe has 8 null pairs, and candidate rows before that are `invalid`.
+
+How a run works (for the dash and the auditor; agent-visible text should not repeat this):
+- Grant `gate` from the scheduler (all timing GPUs, gate cores); servers run on the first timing GPU(s)
+  (`hardware.tensor_parallel`). Reference = recipe `serve.args` + `vllm.env` + `serve.env`; candidate =
+  `forge.tools.bundle.serve_command` over a private copy of the bundle (hash re-checked, symlinks refused;
+  bundle env cannot set FORGE_/LANDLORD_/HF_/cache/PATH/HOME vars).
+- Caches: reference servers share a warm, fixed-path cache per recipe (`gate/cache/ref/<key>`); candidate
+  servers get `gate/cache/cand`, wiped at the start of each gate. Servers get the venv's CUDA toolkit
+  (`site-packages/nvidia/cu*/`) as CUDA_HOME, since cold caches JIT-compile kernels.
+- Timing: `/v1/completions` with chat-templated token ids, temperature 0, `logprobs=1`; per-request end-to-end
+  time; tokens = gate re-tokenized count, must match the server's returned token list within 1%
+  (`usage.completion_tokens` is not used: it reads 2x under speculative decoding in this vLLM build).
+- Locks: `python -m forge.gate.lock write --name main|rehearsal`; a request runs under `FORGE_GATE_LOCK`
+  (default `main`) and is `invalid` if that lock does not verify. The lock covers forge/gate, forge/sandbox,
+  forge/sched and forge/tools/bundle.py.
+
+## Machine detection
+
+Without `FORGE_ROOT/machine.json`: GPUs whose power limit is below their default limit are work GPUs
+(rig: GPU 2), the rest timing; gate cores = first quarter of physical cores + SMT siblings (rig: 0-7,32-39);
+the landlord building is the one whose tailscale IP is ours (rig: `squaredcube1-ubuntu`, hostname
+`squaredcuberig`).

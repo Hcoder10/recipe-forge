@@ -68,7 +68,8 @@ def timed_pass(server, model: str, prompts: list[list[int]], wl: Workload, retok
             out_ids = _ids_from_tokens(lp.get("tokens") or [])
             results[i] = {"dt": dt, "text": ch.get("text", ""), "ids": out_ids,
                           "self_lp": lp.get("token_logprobs") or [],
-                          "reported": (r.get("usage") or {}).get("completion_tokens", len(out_ids))}
+                          "reported": len(out_ids),
+                          "usage": (r.get("usage") or {}).get("completion_tokens")}
 
     t0 = time.perf_counter()
     threads = [threading.Thread(target=worker, daemon=True) for _ in range(max(1, wl.concurrency))]
@@ -82,14 +83,16 @@ def timed_pass(server, model: str, prompts: list[list[int]], wl: Workload, retok
     for r in results:
         r["tokens"] = len(retok(r["text"]))
     tok = sum(r["tokens"] for r in results)
+    # the server's own token list (usage.completion_tokens is unreliable under speculative decoding)
     rep = sum(r["reported"] for r in results)
     if rep == 0 or abs(tok - rep) > TOKEN_TOL * rep:
-        raise GateInvalid(f"token count mismatch: gate counted {tok}, server reported {rep}")
+        raise GateInvalid(f"token count mismatch: gate counted {tok}, server returned {rep} tokens")
     if wl.concurrency <= 1:
         value = tok / sum(r["dt"] for r in results)
     else:
         value = tok / wall
-    return {"value": value, "tokens": tok, "reported": rep, "wall_s": wall, "outputs": results}
+    usage = sum(r["usage"] or 0 for r in results)
+    return {"value": value, "tokens": tok, "reported": rep, "usage_tokens": usage, "wall_s": wall, "outputs": results}
 
 
 def teacher_force(server, model: str, seqs: list[list[int]], start: list[int]) -> list[list[dict[int, float]]]:
@@ -185,7 +188,8 @@ def run(kind: str, slices, wl: Workload, reps: int, ctx: RunCtx, confirm_index: 
                     seqs = [p + out["ids"] for p, out in zip(ids, o["outputs"])]
                     res["tf_other"] = teacher_force(srv, model, seqs, [len(p) for p in ids])
                 got[pos] = res
-                meta.update({"value": res["value"], "tokens": res["tokens"], "wall_s": round(res["wall_s"], 3)})
+                meta.update({"value": res["value"], "tokens": res["tokens"], "usage_tokens": res["usage_tokens"],
+                             "wall_s": round(res["wall_s"], 3)})
             except GateInvalid:
                 raise
             except Exception as e:
