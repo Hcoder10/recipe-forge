@@ -49,17 +49,30 @@ class Machine:
         return cls(**{k: v for k, v in d.items() if k in fields})
 
 
-def _smi() -> list[tuple[int, str, float]]:
+def _smi() -> list[tuple[int, str, float, bool]]:
+    """(index, uuid, GiB, power_capped). A card capped below its default power limit never times."""
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.total", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=30).stdout
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid,memory.total,power.limit,power.default_limit",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.TimeoutExpired):
         return []
     rows = []
     for line in out.strip().splitlines():
-        i, u, m = [x.strip() for x in line.split(",")]
-        rows.append((int(i), u, float(m) / 1024.0))
+        i, u, m, lim, dflt = [x.strip() for x in line.split(",")]
+        try:
+            capped = float(lim) < 0.97 * float(dflt)
+        except ValueError:
+            capped = False
+        rows.append((int(i), u, float(m) / 1024.0, capped))
     return rows
+
+
+def tailnet_ips() -> list[str]:
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [w.split("/")[0] for w in out.split() if w.startswith("100.")]
 
 
 def _split_cpus(n: int) -> tuple[list[int], list[int]]:
@@ -84,11 +97,8 @@ def load(path: str | None = None) -> Machine:
             return Machine.from_dict(json.load(f))
     rows = _smi()
     host = socket.gethostname()
-    idx = [r[0] for r in rows]
-    if host == "squaredcube1-ubuntu":
-        timing, work = [i for i in idx if i in (0, 1)], [i for i in idx if i == 2]
-    else:
-        timing, work = idx, []
+    timing = [r[0] for r in rows if not r[3]]
+    work = [r[0] for r in rows if r[3]]
     gate, agent = _split_cpus(os.cpu_count() or 1)
     return Machine(name=host, building=os.environ.get("LANDLORD_BUILDING", host), timing_gpus=timing,
                    work_gpus=work, vram_gb={r[0]: round(r[2], 2) for r in rows},

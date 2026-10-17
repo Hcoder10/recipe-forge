@@ -25,6 +25,8 @@ ALPHA_CONFIRM = 0.05
 MIN_NULL_PAIRS = 8
 TOKEN_TOL = 0.01
 PROBE_TOPK = 5
+QUIET_RETRIES = 6
+QUIET_WAIT_S = 10
 
 
 @dataclasses.dataclass
@@ -153,6 +155,12 @@ def run(kind: str, slices, wl: Workload, reps: int, ctx: RunCtx, confirm_index: 
         for pos in order:
             side = sides[pos]
             why = ctx.quiet()
+            for _ in range(QUIET_RETRIES):
+                if not why:
+                    break
+                ctx.log(f"waiting for a quiet machine: {why}")
+                time.sleep(QUIET_WAIT_S)
+                why = ctx.quiet()
             if why:
                 raise GateInvalid(f"machine not quiet before rep {r}: {why}")
             name = f"r{r}{'ab'[pos]}"

@@ -47,7 +47,7 @@ def snapshot_dir(model: str) -> str:
     return snaps[-1]
 
 
-def _gpu_busy(cpus: list[int], secs: float = 1.0) -> float:
+def _cpu_busy(cpus: list[int], secs: float = 1.0) -> float:
     def snap():
         out = {}
         with open("/proc/stat") as f:
@@ -67,7 +67,7 @@ def _gpu_busy(cpus: list[int], secs: float = 1.0) -> float:
             tot = b[c][0] - a[c][0]
             idle = b[c][1] - a[c][1]
             busy.append(1 - idle / tot if tot else 0)
-    return max(busy) if busy else 0.0
+    return sum(busy) / len(busy) if busy else 0.0
 
 
 class RealCtx:
@@ -134,6 +134,12 @@ class RealCtx:
         cache = self.ref_cache if side == "A" else self.cand_cache
         env.update({"HF_HOME": hf_home(), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                     "HF_MODULES_CACHE": os.path.join(cache, "hf_modules")})
+        # private caches start cold, so JIT kernels need the venv's own CUDA toolkit
+        nvcc = sorted(glob.glob(os.path.join(self.venv, "lib", "python3*", "site-packages", "nvidia", "cu*", "bin",
+                                             "nvcc")))
+        if nvcc:
+            env["CUDA_HOME"] = os.path.dirname(os.path.dirname(nvcc[-1]))
+            env["PATH"] = os.path.dirname(nvcc[-1])
         ro = [self.venv, hf_home()]
         if side == "B":
             ro += [self.bundle] + ([hook] if os.path.isdir(hook) else [])
@@ -147,9 +153,9 @@ class RealCtx:
         foreign = GpuWatch(list(self.grant.gpu_uuids), own_unit="").check_once()
         if foreign:
             return f"GPU processes present on gate GPUs: {foreign[:2]}"
-        busy = _gpu_busy(list(self.grant.cpus))
-        if busy > 0.5:
-            return f"gate CPU cores busy ({busy:.0%})"
+        busy = _cpu_busy(list(self.grant.cpus))
+        if busy > 0.3:
+            return f"gate CPU cores busy (mean {busy:.0%})"
         return None
 
     def watch(self, srv):
@@ -328,6 +334,7 @@ def main(argv: list[str]) -> int:
         return 1
     svc = Service(log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
     if argv and argv[0] == "once":
+        os.sched_setaffinity(0, _gate_cpus())
         req = L.get_request(argv[1])
         v = svc.run_request(req)
         print(json.dumps({k: v.get(k) for k in ("gate_id", "verdict", "detail", "delta_pct", "minutes")}))

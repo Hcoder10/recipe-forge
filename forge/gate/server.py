@@ -65,9 +65,10 @@ class GateServer:
                "VLLM_PORT": str(self.ports[0] + 1), "VLLM_NO_USAGE_STATS": "1", "DO_NOT_TRACK": "1"}
         if self.lease_id:
             env["LANDLORD_LEASE_ID"] = self.lease_id
+        extra_path = [p for p in env.pop("PATH", "").split(":") if p]
         spec = Spec(cmd=self.argv, job_dir=self.job_dir, ro=self.ro, rw=[self.cache_dir], gpus=self.gpus,
                     ports=self.ports, cpus=self.cpus, env=env,
-                    path_prepend=[os.path.dirname(self.argv[0])], cwd=ws, name=self.name)
+                    path_prepend=[os.path.dirname(self.argv[0])] + extra_path, cwd=ws, name=self.name)
         t0 = time.time()
         self.job = launch(spec)
         end = t0 + self.start_timeout

@@ -89,7 +89,11 @@ def serve() -> None:
         sys.exit(1)
     m = machine_mod.load()
     tenant = f"forge-sched@{m.name}/recipe-forge"
-    keeper = LeaseKeeper(os.path.join(sd, "leases.json"), LandlordClient(tenant=tenant), building=m.building)
+    client = LandlordClient(tenant=tenant)
+    if not os.environ.get("LANDLORD_BUILDING") and not os.path.exists(os.path.join(machine_mod.forge_root(),
+                                                                                    "machine.json")):
+        m.building = _building_by_ip(client, m.building)
+    keeper = LeaseKeeper(os.path.join(sd, "leases.json"), client, building=m.building)
     sched = Scheduler(m, keeper, os.path.join(sd, "grants.json"))
     _Handler.sched = sched
     httpd = ThreadingHTTPServer(("127.0.0.1", PORT), _Handler)
@@ -127,6 +131,20 @@ def serve() -> None:
     finally:
         _shutdown("exit")
         lockf.close()
+
+
+def _building_by_ip(client: LandlordClient, default: str) -> str:
+    """The landlord building whose tailscale IP is one of ours (hostnames need not match)."""
+    ips = set(machine_mod.tailnet_ips())
+    for _ in range(3):
+        try:
+            for b in client.overview().get("buildings", []):
+                if b.get("tailscale_ip") in ips:
+                    return b["building"]
+            return default
+        except Exception:
+            time.sleep(2)
+    return default
 
 
 def ensure() -> int:
