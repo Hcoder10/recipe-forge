@@ -340,8 +340,10 @@ def main() -> None:
                                     "measurement_version": 2}).encode()).hexdigest()[:20]
         cache = Path(spec["ref_cache_dir"]) / f"{key}.json"
         out["ref_key"] = key
-        if cache.exists() and not spec.get("fresh_reference"):
-            out["reference"] = json.loads(cache.read_text())
+        cached = json.loads(cache.read_text()) if cache.exists() else None
+        max_age = float(spec.get("ref_max_age_s", 1800))
+        if cached and not spec.get("fresh_reference") and time.time() - cached.get("measured_at", 0) < max_age:
+            out["reference"] = cached
             out["reference_cached"] = True
         else:
             try:
@@ -350,6 +352,8 @@ def main() -> None:
                 out["infra"] = True     # the unmodified published recipe failed: not the agent's doing
                 raise
             out["reference"]["measured_at"] = time.time()
+            if cached:   # the previous reference on this GPU: a run-to-run noise sample for the agents
+                out["previous_reference_value"] = cached.get("value")
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps(out["reference"]))
             out["reference_cached"] = False

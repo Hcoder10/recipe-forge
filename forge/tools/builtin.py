@@ -108,6 +108,8 @@ def t_bench(ctx, config_delta=None, env=None, bundle=None, n_prompts=None, fresh
                                  label=label or ("ref" if not (delta or env or bundle) else "cand"))
     res = {"gpu": out.get("gpu", {}).get("name"), "metric": m.metric,
            "reference": _brief_measure(out.get("reference")), "reference_cached": out.get("reference_cached")}
+    if out.get("previous_reference_value") is not None:
+        res["previous_reference_value"] = out["previous_reference_value"]
     if "candidate" in out:
         res["candidate"] = _brief_measure(out["candidate"])
         res["delta_pct"] = out.get("delta_pct")
