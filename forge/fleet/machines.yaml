@@ -1,0 +1,18 @@
+# Static fleet machines. Rented Vast boxes are added at runtime to <FORGE_STATE>/fleet/machines/<name>.json
+# by `forge rent` and synced to the rig, so the mission runner there can reach them.
+rig:
+  name: rig
+  hostname: squaredcuberig          # `hostname` on the machine; the executor runs locally when it matches
+  building: squaredcube1-ubuntu     # landlord building
+  ssh: {host: 100.68.107.11, user: cube}
+  forge_root: /home/cube/forge
+  gpu_class: rtxpro6000_95g
+  gpus: {timing: [0, 1], work: [2]}
+  python: /home/cube/venvs/vllm-bolt/bin/python
+  sched_python: /home/cube/venvs/vllm-bolt/bin/python
+  python_for:                       # recipe base id -> venv python on this machine
+    bolt-74b-lilicorr: /home/cube/venvs/vllm-bolt/bin/python
+    supervl-120b-nvfp4-lilicorr: /home/cube/venvs/vllm-svl/bin/python
+  recipes: [bolt-74b-lilicorr, supervl-120b-nvfp4-lilicorr]   # models present locally (no downloads on the rig)
+  env: {HF_HOME: /home/cube/hf, HF_HUB_OFFLINE: "1", FORGE_ROOT: /home/cube/forge, LANDLORD_URL: "http://100.112.46.57:7788/mcp"}
+  results_dir: /home/cube/forge/results

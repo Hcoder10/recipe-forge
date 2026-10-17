@@ -1,0 +1,54 @@
+id: bolt-74b-lilicorr
+title: NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB + LiLiCorr drafter
+model: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB
+revision: main
+drafter: {model: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr, note: "DFlash method, num_speculative_tokens 7 (card speculative-config). Drafter card: NVIDIA Blackwell, SM 120 only, including DGX Spark (GB10)."}
+engine: vllm
+weights_gb: 25.05
+vllm:
+  min_version: null
+  image: vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989
+  run_image: vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989   # image the fleet runs (satisfies min_version; same build as the rig venv)
+  env: {VLLM_USE_V2_MODEL_RUNNER: "1"}
+  extra_files: [{url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB/resolve/main/ultra_v3_reasoning_parser.py, dest: ultra_v3_reasoning_parser.py}]
+serve:
+  args: ["--trust-remote-code", "--load-format", "auto", "--tensor-parallel-size", "1", "--max-model-len", "262144", "--max-num-seqs", "1", "--enable-chunked-prefill", "--kv-cache-dtype", "fp8", "--linear-backend", "b12x", "--moe-backend", "b12x", "--attention-backend", "FLASHINFER", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "bfloat16", "--mamba-cache-dtype", "bfloat16", "--mamba-cache-mode", "align", "--seed", "42", "--allowed-local-media-path", "/", "--limit-mm-per-prompt", "{\"video\":1,\"image\":1}", "--video-pruning-rate", "0.5", "--media-io-kwargs", "{\"video\":{\"fps\":2,\"num_frames\":256}}", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser-plugin", "ultra_v3_reasoning_parser.py", "--reasoning-parser", "ultra_v3", "--speculative-config", "{\"method\":\"dflash\",\"model\":\"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr\",\"num_speculative_tokens\":7,\"rejection_sample_method\":\"standard\",\"attention_backend\":\"FLASHINFER\",\"draft_load_config\":{\"load_format\":\"auto\"}}"]
+  source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB#vllm
+  quoted: |
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    
+    vllm serve nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB \
+      --trust-remote-code \
+      --load-format auto \
+      --tensor-parallel-size 1 \
+      --max-model-len 262144 \
+      --max-num-seqs 1 \
+      --enable-chunked-prefill \
+      --kv-cache-dtype fp8 \
+      --linear-backend b12x \
+      --moe-backend b12x \
+      --attention-backend FLASHINFER \
+      --mamba-backend flashinfer \
+      --mamba-ssm-cache-dtype bfloat16 \
+      --mamba-cache-dtype bfloat16 \
+      --mamba-cache-mode align \
+      --seed 42 \
+      --allowed-local-media-path / \
+      --limit-mm-per-prompt '{"video":1,"image":1}' \
+      --video-pruning-rate 0.5 \
+      --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser-plugin ultra_v3_reasoning_parser.py \
+      --reasoning-parser ultra_v3 \
+      --speculative-config '{"method":"dflash","model":"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr","num_speculative_tokens":7,"rejection_sample_method":"standard","attention_backend":"FLASHINFER","draft_load_config":{"load_format":"auto"}}'
+  notes: "Card: \"This model requires the following vLLM version or newer. Please use this command.\" (docker image nightly-77154ca6...). Quick Start also runs, inside the container, `pip install b12x` and `vllm download-kernels` before serving (needed for --linear-backend b12x / --moe-backend b12x). Card publishes only this drafter (DFlash/LiLiCorr) command; no drafter-free vLLM command is published. Reasoning: enable_thinking True/False; medium effort via {\"enable_thinking\": true, \"medium_effort\": true}."
+chat:
+  system_prompt: null
+  chat_template_kwargs: {enable_thinking: false}
+hardware:
+  fits: [rtx5090_32g, rtxpro6000_95g]
+  tensor_parallel: 1
+  notes: "Card: Supported Hardware Microarchitecture Compatibility: NVIDIA Blackwell SM120 & SM121; Deployment row: vLLM on NVIDIA Ampere (A100), Hopper (H100-80GB), or Blackwell. Test hardware list includes NVIDIA Blackwell GeForce RTX 5090, DGX Spark, RTX Spark. Experts are IQ2-XXS (2.0625 bpw) packed to 24GB. Command uses --max-model-len 262144 --max-num-seqs 1."
+variants:
+  - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}

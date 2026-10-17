@@ -1,0 +1,52 @@
+id: supervl-120b-nvfp4
+title: NVIDIA Nemotron 3.5 Super VL 120B-A12B NVFP4
+model: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+revision: main
+drafter: null
+engine: vllm
+weights_gb: 75.01
+vllm:
+  min_version: "0.32.0"
+  image: vllm/vllm-openai:v0.32.0
+  run_image: vllm/vllm-openai:nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2   # image the fleet runs (satisfies min_version; same build as the rig venv)
+  env: {}
+  extra_files: []
+serve:
+  args: ["--served-model-name", "nemotron-3.5-super-vl", "--tensor-parallel-size", "2", "--max-num-seqs", "128", "--trust-remote-code", "--gpu-memory-utilization", "0.89", "--max-num-batched-tokens", "16384", "--block-size", "64", "--prefix-match-unit", "64", "--compilation_config.max_cudagraph_capture_size", "256", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding", "--mamba-cache-philox-rounds", "5", "--enable-mamba-shared-prefix-checkpoint", "--mamba-cache-mode", "align", "--speculative-config.method", "mtp", "--speculative-config.num_speculative_tokens", "3", "--video-pruning-rate", "0.5", "--media-io-kwargs", "{\"video\": {\"fps\": 2, \"num_frames\": 256}}", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser", "nemotron_v3"]
+  source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4#2-h100-up-to-1m-context-length
+  quoted: |
+    vllm serve $MODEL \
+      --served-model-name nemotron-3.5-super-vl \
+      --tensor-parallel-size 2 \
+      --max-num-seqs 128 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.89 \
+      --max-num-batched-tokens 16384 \
+      --block-size 64 \
+      --prefix-match-unit 64 \
+      --compilation_config.max_cudagraph_capture_size 256 \
+      --mamba-backend flashinfer \
+      --mamba-ssm-cache-dtype float16 \
+      --enable-mamba-cache-stochastic-rounding \
+      --mamba-cache-philox-rounds 5 \
+      --enable-mamba-shared-prefix-checkpoint \
+      --mamba-cache-mode align \
+      --speculative-config.method mtp \
+      --speculative-config.num_speculative_tokens 3 \
+      --video-pruning-rate 0.5 \
+      --media-io-kwargs '{"video": {"fps": 2, "num_frames": 256}}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser nemotron_v3
+  notes: "Card section \"vLLM > 2x H100 (up to 1M Context Length)\". Uses the native MTP head (--speculative-config.method mtp, 3 tokens); no separate drafter download. Card: \"For one H200, use the same command with --tensor-parallel-size 1.\" Card: \"To compare with standard decoding, remove the speculative configuration while keeping ... other server settings the same.\" Image nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2 or v0.32.0."
+chat:
+  system_prompt: null
+  chat_template_kwargs: {enable_thinking: false}
+hardware:
+  fits: []
+  tensor_parallel: 2
+  notes: "Published as TP=2 (2x H100). The source states one H200 (141 GB) runs the same command with --tensor-parallel-size 1; it gives no single-GPU vLLM command for RTX Pro 6000 (points to llama.cpp/Unsloth for local hardware). ~75 GB of weights on a 95 GB card leaves under 20% headroom."
+variants:
+  - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
+  - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
+  - {name: c16, concurrency: 16, max_tokens: 512, metric: output_tok_s}

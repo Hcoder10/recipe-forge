@@ -1,0 +1,39 @@
+id: nano3-30b-a3b-bf16
+title: NVIDIA Nemotron 3 Nano 30B-A3B BF16
+model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+revision: main
+drafter: null
+engine: vllm
+weights_gb: 63.16
+vllm:
+  min_version: "0.12.0"
+  image: vllm/vllm-openai:v0.12.0
+  run_image: vllm/vllm-openai:nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2   # image the fleet runs (satisfies min_version; same build as the rig venv)
+  env: {}
+  extra_files: [{url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/resolve/main/nano_v3_reasoning_parser.py, dest: nano_v3_reasoning_parser.py}]
+serve:
+  args: ["--served-model-name", "model", "--max-num-seqs", "8", "--tensor-parallel-size", "1", "--max-model-len", "262144", "--trust-remote-code", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--reasoning-parser-plugin", "nano_v3_reasoning_parser.py", "--reasoning-parser", "nano_v3"]
+  source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16#use-it-with-vllm
+  quoted: |
+    vllm serve nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --served-model-name model \
+      --max-num-seqs 8 \
+      --tensor-parallel-size 1 \
+      --max-model-len 262144 \
+      --port 8000 \
+      --trust-remote-code \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser-plugin nano_v3_reasoning_parser.py \
+      --reasoning-parser nano_v3
+  notes: "Card: pip install -U \"vllm>=0.12.0\"; Jetson Thor / DGX Spark: NGC vllm container 25.12.post1-py3. Context 256k in this command; up to 1M with VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 and --max-model-len 1M. Image tag not named by the card (v0.12.0 is the nearest official tag meeting the minimum). Reasoning on by default; enable_thinking=False turns it off."
+chat:
+  system_prompt: null
+  chat_template_kwargs: {enable_thinking: false}
+hardware:
+  fits: [rtxpro6000_95g]
+  tensor_parallel: 1
+  notes: "Card test hardware: NVIDIA B200 192GB, RTX PRO 6000 96GB, Jetson Thor, DGX Spark."
+variants:
+  - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
+  - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}

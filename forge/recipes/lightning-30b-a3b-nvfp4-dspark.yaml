@@ -1,0 +1,41 @@
+id: lightning-30b-a3b-nvfp4-dspark
+title: NVIDIA Nemotron 3.5 Lightning 30B-A3B NVFP4 + DSpark drafter
+model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+revision: main
+drafter: {model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark, note: "speculative_config.num_speculative_tokens 3; card: DSpark recommended default for DGX Spark and low-concurrency serving."}
+engine: vllm
+weights_gb: 22.91
+vllm:
+  min_version: "0.27.1"
+  image: vllm/vllm-openai:v0.27.1
+  run_image: vllm/vllm-openai:nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2   # image the fleet runs (satisfies min_version; same build as the rig venv)
+  env: {}
+  extra_files: []
+serve:
+  args: ["--moe-backend", "marlin", "--kv-cache-dtype", "fp8", "--enable-prefix-caching", "--gpu-memory-utilization", "0.85", "--speculative_config.num_speculative_tokens", "3", "--mamba-backend", "flashinfer", "--mamba-cache-mode", "align", "--reasoning-parser", "nemotron_v3", "--speculative_config.model", "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark", "--tool-call-parser", "qwen3_coder", "--enable-auto-tool-choice"]
+  source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4#1x-dgx-spark-gb10
+  quoted: |
+    vllm serve --model $MODEL_CKPT \
+      --moe-backend marlin \
+      --kv-cache-dtype fp8 \
+      --enable-prefix-caching \
+      --gpu-memory-utilization 0.85 \
+      --speculative_config.num_speculative_tokens 3 \
+      --mamba-backend flashinfer \
+      --mamba-cache-mode align \
+      --reasoning-parser nemotron_v3 \
+      --speculative_config.model $DSPARK_CKPT \
+      --tool-call-parser qwen3_coder \
+      --enable-auto-tool-choice
+  notes: "Card section \"1x DGX Spark (GB10)\" (same as Quick Start: \"this recipe uses DSpark speculative decoding, tuned for DGX Spark\"). $MODEL_CKPT/$DSPARK_CKPT substituted from the card's export lines; --model removed from args. Validated context 1M (default). A DFlash drafter (nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash) also exists; the card shows it only with SGLang flags."
+chat:
+  system_prompt: null
+  chat_template_kwargs: {enable_thinking: false}
+hardware:
+  fits: [rtx5090_32g, rtxpro6000_95g]
+  tensor_parallel: 1
+  notes: "Recipe is for DGX Spark (GB10, sm_121). Card: RTX 5090 NVFP4 row says no recipe published."
+variants:
+  - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
+  - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
+  - {name: c16, concurrency: 16, max_tokens: 512, metric: output_tok_s}

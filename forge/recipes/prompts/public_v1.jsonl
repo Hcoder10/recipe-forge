@@ -1,0 +1,24 @@
+{"id": "pub-00", "kind": "inst", "messages": [{"role": "user", "content": "Write a step-by-step guide to repotting a houseplant whose roots are circling the pot."}]}
+{"id": "pub-01", "kind": "inst", "messages": [{"role": "user", "content": "Explain how a bloom filter works, including its false-positive behaviour, to a junior engineer."}]}
+{"id": "pub-02", "kind": "inst", "messages": [{"role": "user", "content": "Summarize the main causes of the French Revolution in five paragraphs."}]}
+{"id": "pub-03", "kind": "inst", "messages": [{"role": "user", "content": "Write a Python function that merges overlapping intervals, then explain its time complexity."}]}
+{"id": "pub-04", "kind": "inst", "messages": [{"role": "user", "content": "Draft a polite email to a landlord asking for a broken heater to be repaired this week."}]}
+{"id": "pub-05", "kind": "inst", "messages": [{"role": "user", "content": "Describe the water cycle for a ten-year-old, using one everyday example per stage."}]}
+{"id": "pub-06", "kind": "inst", "messages": [{"role": "user", "content": "List twelve ideas for a weekend science project with household materials, with one sentence each."}]}
+{"id": "pub-07", "kind": "inst", "messages": [{"role": "user", "content": "Explain the difference between TCP and UDP and when you would choose each."}]}
+{"id": "pub-08", "kind": "inst", "messages": [{"role": "user", "content": "Write a short story (about 400 words) about a lighthouse keeper who finds a message in a bottle."}]}
+{"id": "pub-09", "kind": "inst", "messages": [{"role": "user", "content": "Give a detailed recipe for vegetable lentil soup, including prep times and substitutions."}]}
+{"id": "pub-10", "kind": "inst", "messages": [{"role": "user", "content": "Explain what a Fourier transform does, with an intuitive analogy and one worked example."}]}
+{"id": "pub-11", "kind": "inst", "messages": [{"role": "user", "content": "Write a SQL query that finds the top three customers by total order value per country, and explain it."}]}
+{"id": "pub-12", "kind": "inst", "messages": [{"role": "user", "content": "Compare the pros and cons of renting versus buying a home for someone who may move in three years."}]}
+{"id": "pub-13", "kind": "inst", "messages": [{"role": "user", "content": "Write a bash script that backs up a directory to a dated tar.gz and keeps only the last seven backups."}]}
+{"id": "pub-14", "kind": "inst", "messages": [{"role": "user", "content": "Explain how vaccines train the immune system, covering antibodies and memory cells."}]}
+{"id": "pub-15", "kind": "inst", "messages": [{"role": "user", "content": "Create a four-week beginner running plan that ends with a continuous 5 km run."}]}
+{"id": "pub-16", "kind": "chat", "messages": [{"role": "user", "content": "I'm planning a three-day trip to Kyoto in autumn. What should I prioritize, and how should I split the days?"}]}
+{"id": "pub-17", "kind": "chat", "messages": [{"role": "user", "content": "My sourdough keeps coming out dense. I feed the starter once a day and bake straight from the fridge. What could be wrong?"}]}
+{"id": "pub-18", "kind": "chat", "messages": [{"role": "user", "content": "Can you help me understand why my monthly budget never balances? I earn 4200, rent is 1600, and I don't track small purchases."}]}
+{"id": "pub-19", "kind": "chat", "messages": [{"role": "user", "content": "I have a job interview for a data analyst role tomorrow. What questions should I expect and how should I prepare tonight?"}]}
+{"id": "pub-20", "kind": "chat", "messages": [{"role": "user", "content": "What's a good way to start learning the guitar as an adult with only twenty minutes a day?"}]}
+{"id": "pub-21", "kind": "chat", "messages": [{"role": "user", "content": "My team keeps missing sprint deadlines. As a new manager, how should I approach the next retrospective?"}]}
+{"id": "pub-22", "kind": "chat", "messages": [{"role": "user", "content": "I want to get into birdwatching. What gear do I actually need, and how do I identify birds I see?"}]}
+{"id": "pub-23", "kind": "chat", "messages": [{"role": "user", "content": "Explain like I'm new to it: what is a mortgage rate lock and should I get one?"}]}
