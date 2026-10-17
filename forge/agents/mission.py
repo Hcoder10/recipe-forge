@@ -369,6 +369,8 @@ class MissionRunner:
         self.brief = mission_brief(self.mission)
         self.protocol_text = self.playbook["protocol"].replace("{bar}", str(self.playbook["knobs"]
                                                                             ["verifier_bar_pct"]))
+        if self.playbook.get("techniques"):
+            self.protocol_text += "\n\n" + self.playbook["techniques"]
         self.agents: dict[str, Agent] = {}
         self.services.gate_queue = GateQueue(self)
         tc = self.team_cfg

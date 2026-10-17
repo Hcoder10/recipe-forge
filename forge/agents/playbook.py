@@ -54,6 +54,24 @@ DEFAULT = {
         "6. Request the gate (make_bundle, bench(bundle), request_gate) only if the delta clearly clears the "
         "Verifier's bar of {bar}% on the quick bench."
     ),
+    "techniques": (
+        "STARTER TECHNIQUES (standard levers worth testing; no expected results are implied, measure everything; "
+        "always read the model's config.json and the vLLM model file first to see which apply to this architecture):\n"
+        "- drafter / speculative decoding: sweep the number of speculative tokens; compare drafter methods the "
+        "engine supports for this model; check the acceptance rate per position in the server log.\n"
+        "- config / scheduling: max-num-batched-tokens, max-num-seqs (throughput workloads), chunked-prefill "
+        "settings, async scheduling, prefix caching on/off.\n"
+        "- config / compile & graphs: compilation level/mode, CUDA graph capture sizes and mode, "
+        "enforce-eager comparisons to find graph-capture overhead.\n"
+        "- config / kernels: the attention, MoE, Mamba/SSM and linear backends the engine exposes for this "
+        "architecture (only lossless choices; keep dtypes and quantization as in the recipe).\n"
+        "- runtime: per-step CPU overhead in the decode loop (scheduler, sampler, detokenizer) seen in profile().\n"
+        "- kernels: fuse or specialise the hottest ops the profile shows, verified with kernel_test against "
+        "the original op.\n"
+        "- system: CPU affinity / thread counts for the server process.\n"
+        "Never change model weights, dtypes, quantization, sampling or the number of generated tokens: those "
+        "change outputs, and the gate rejects lossy candidates."
+    ),
     "knobs": {"verifier_bar_pct": 3.0, "facts_refresh_turns": 8, "keep_turns": 12},
 }
 
