@@ -1,4 +1,8 @@
-"""forge.sandbox: run one job under Landlock inside its own systemd --user scope.
+"""Run a Landlock job in a systemd user scope, or a supervised process group.
+
+FORGE_SANDBOX_NO_SYSTEMD=1 forces the fallback. Otherwise availability is cached
+per process. The fallback adopts orphaned descendants and tracks /proc identities
+and a job environment token; it does not provide systemd's MemoryMax accounting.
 
     from forge.sandbox import Spec, launch
     job = launch(Spec(cmd=["python", "x.py"], job_dir="/home/cube/forge/jobs/j1",
@@ -20,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -30,6 +35,24 @@ SYSTEM_RO = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt"
 DEV_FILES = ["/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty"]
 GPU_SHARED_NODES = ["/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia-modeset"]
 BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_systemd_available: bool | None = None
+_systemd_lock = threading.Lock()
+
+
+def _use_systemd() -> bool:
+    global _systemd_available
+    if os.environ.get("FORGE_SANDBOX_NO_SYSTEMD") == "1":
+        return False
+    with _systemd_lock:
+        if _systemd_available is None:
+            try:
+                result = subprocess.run(
+                    ["systemd-run", "--user", "--scope", "--quiet", "--collect", "/bin/true"],
+                    env=_user_bus_env(), capture_output=True, timeout=10)
+                _systemd_available = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                _systemd_available = False
+        return _systemd_available
 
 
 @dataclasses.dataclass
@@ -141,6 +164,9 @@ class Job:
         self.pid = proc.pid
         self.started = time.time()
         self.returncode: int | None = None
+        self.containment = "systemd-scope"
+        self.survivors: list[int] = []
+        self._report_path: str | None = None
 
     def poll(self) -> int | None:
         rc = self.proc.poll()
@@ -165,6 +191,14 @@ class Job:
 
     def stop(self, grace: float = 15.0) -> None:
         """SIGTERM every process in the scope, then SIGKILL after `grace` seconds."""
+        if self.containment == "pgroup-fallback":
+            if self.proc.poll() is None:
+                with open(self._report_path + ".grace", "w") as f:
+                    f.write(str(grace))
+                self.proc.terminate()
+            self.returncode = self.proc.wait()
+            self._reap_scope()
+            return
         _systemctl("kill", "--signal=SIGTERM", self.unit + ".scope")
         end = time.time() + grace
         while time.time() < end and (self.proc.poll() is None or _scope_active(self.unit)):
@@ -177,7 +211,16 @@ class Job:
             self.proc.wait()
         self.returncode = self.proc.returncode
 
+    def kill(self, grace: float = 15.0) -> list[int]:
+        """Stop the job and return any surviving processes."""
+        self.stop(grace)
+        return list(self.survivors)
+
     def _reap_scope(self) -> None:
+        if self.containment == "pgroup-fallback":
+            with open(self._report_path) as f:
+                self.survivors = json.load(f)["survivors"]
+            return
         if _scope_active(self.unit):
             _systemctl("kill", "--signal=SIGKILL", self.unit + ".scope")
             for _ in range(40):
@@ -221,7 +264,8 @@ def _user_bus_env() -> dict[str, str]:
 
 
 def launch(spec: Spec) -> Job:
-    """Start spec.cmd sandboxed in a fresh scope. Raises SandboxError on a bad spec."""
+    """Start spec.cmd sandboxed with automatic containment selection."""
+    global _systemd_available
     if landlock.abi_version() < 6:
         raise SandboxError("Landlock ABI >= 6 required (scoping)")
     jd = _norm(spec.job_dir)
@@ -229,6 +273,7 @@ def launch(spec: Spec) -> Job:
         os.makedirs(os.path.join(jd, d), mode=0o700, exist_ok=True)
     rules, net = build_rules(spec)
     env = build_env(spec)
+    env["FORGE_JOB_TOKEN"] = uuid.uuid4().hex
     unit = "forge-" + (spec.name or uuid.uuid4().hex[:12])
     payload = {"cmd": spec.cmd, "env": env, "cwd": _norm(spec.cwd) if spec.cwd else os.path.join(jd, "ws"),
                "cpus": spec.cpus, "paths": rules, **net, "scope": True, "unit": unit}
@@ -237,18 +282,56 @@ def launch(spec: Spec) -> Job:
         json.dump(payload, f, indent=1)
     os.chmod(spec_path, 0o600)
     log_path = os.path.join(jd, "log")
-    log = open(log_path, "ab")
     pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    entry = [sys.executable, "-I", "-c",
+             f"import sys; sys.path.insert(0, {pkg_parent!r}); from forge.sandbox.enter import run; "
+             f"run({spec_path!r})"]
+    use_systemd = _use_systemd()
+    # A readiness file distinguishes a scope launch failure from a job failure.
+    ready = os.path.join(jd, ".started-" + uuid.uuid4().hex)
     argv = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit", unit]
     if spec.mem_max:
         argv += ["-p", f"MemoryMax={spec.mem_max}"]
     argv += [sys.executable, "-I", "-c",
              f"import sys; sys.path.insert(0, {pkg_parent!r}); from forge.sandbox.enter import run; "
+             f"open({ready!r}, 'w').close(); "
              f"run({spec_path!r})"]
     penv = _user_bus_env()
-    try:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                env=penv, start_new_session=True)
-    finally:
-        log.close()
-    return Job(unit, jd, proc, log_path)
+    report_path = os.path.join(jd, ".processes-" + uuid.uuid4().hex + ".json")
+    with open(log_path, "ab") as log:
+        if use_systemd:
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                        env=penv, start_new_session=True)
+            except OSError:
+                use_systemd = False
+            else:
+                deadline = time.monotonic() + 15
+                while not os.path.exists(ready) and proc.poll() is None:
+                    if time.monotonic() >= deadline:
+                        # An ambiguous launch must not execute the command twice.
+                        Job(unit, jd, proc, log_path).stop(grace=0)
+                        raise SandboxError("systemd scope startup timed out")
+                    time.sleep(0.01)
+                use_systemd = os.path.exists(ready)
+                if use_systemd:
+                    os.unlink(ready)
+            if not use_systemd:
+                with _systemd_lock:
+                    _systemd_available = False
+        if not use_systemd:
+            argv = [sys.executable, "-I", "-c",
+                    f"import sys; sys.path.insert(0, {pkg_parent!r}); "
+                    f"from forge.sandbox.supervisor import run; run({spec_path!r}, {entry!r}, {report_path!r})"]
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                    env=penv, start_new_session=True)
+            # Wait until the supervisor has installed its signal handler and recorded its group.
+            while not os.path.exists(report_path):
+                if proc.poll() is not None:
+                    raise SandboxError("fallback supervisor failed to start; see " + log_path)
+                time.sleep(0.01)
+    job = Job(unit, jd, proc, log_path)
+    if not use_systemd:
+        job.containment = "pgroup-fallback"
+        job._report_path = report_path
+    return job
