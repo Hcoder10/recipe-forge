@@ -2,18 +2,23 @@
 
 Live transcript of the focused mission's events.jsonl, a leaderboard strip, and a prompt:
   /missions  /mission <id>  /inbox  /answer <question_id> <text>  /leaderboard  /help  /quit
+  /compare [mission|all]  /gate  /facts [mission]  /n1  /pause  /resume  /stop [reason]
   free text = an operator note to the focused mission's Lead (missions/<id>/operator_notes.jsonl)
 Only stdlib (curses), so it runs with any python on the rig.
 """
 from __future__ import annotations
 
 import argparse
-import curses
+try:
+    import curses
+except ImportError:  # Data helpers and command tests also run on Windows.
+    curses = None
 import json
 import os
 import time
 
 from forge.dash.reader import JsonlTail, Reader, _short, _ts
+from forge.tui import data
 
 ROLE_COLOR = {"lead": 1, "worker": 2, "verifier": 3, "gate": 4, "system": 5, "operator": 6, "human": 6}
 QUIET_KINDS = {"llm_call", "compaction", "done_locked"}
@@ -93,14 +98,12 @@ class App:
         self.panel: list[str] = []
         self.scroll = 0
         self.last_poll = 0.0
+        self.pending_stop: tuple[str, str] | None = None
 
     # ---------------------------------------------------------------- data
     def mission_dir(self, mid: str) -> str | None:
-        for pre in ("state/missions", "missions"):
-            d = os.path.join(self.root, pre, mid)
-            if os.path.isdir(d):
-                return d
-        return None
+        path = data.mission_dir(self.root, mid)
+        return str(path) if path else None
 
     def current(self) -> str | None:
         if self.focus:
@@ -159,6 +162,18 @@ class App:
         if not line:
             return True
         mid = self.current()
+        if self.pending_stop:
+            target, reason = self.pending_stop
+            if line.lower() not in ("y", "n"):
+                self.msg = f"stop {target}? type y or n"
+                return True
+            self.pending_stop = None
+            if line.lower() == "y":
+                data.control_data(self.root, target, "stop", reason, confirmed=True)
+                self.msg = f"stop requested for {target}"
+            else:
+                self.msg = "stop cancelled"
+            return True
         if not line.startswith("/"):
             if not mid:
                 self.msg = "no mission to send the note to"
@@ -172,7 +187,30 @@ class App:
         if cmd in ("quit", "q", "exit"):
             return False
         if cmd == "help":
-            self.show("help", __doc__.strip().splitlines()[2:6] + ["", "keys: PgUp/PgDn scroll, Esc back to transcript"])
+            self.show("help", ["/missions  /mission <id>  /inbox  /answer <question_id> <text>",
+                               "/leaderboard  /compare [mission|all]  /gate  /facts [mission]  /n1",
+                               "/pause [reason]  /resume [reason]  /stop [reason] (confirm y/n)",
+                               "/help  /quit; free text sends an operator note to Lead",
+                               "keys: PgUp/PgDn scroll, Esc back to transcript"])
+        elif cmd == "compare":
+            fleet = arg in ("all", "fleet") or (not arg and not mid)
+            target = None if fleet else arg or mid
+            self.show("compare", data.compare_lines(data.compare_data(self.root, target), fleet))
+        elif cmd == "gate":
+            self.show("gate", [data.gate_line(r) for r in data.gate_data(self.root)] or ["no gate requests or results"])
+        elif cmd == "facts":
+            self.show("facts", data.facts_lines(data.facts_data(self.root, arg or mid)))
+        elif cmd == "n1":
+            self.show("n1", data.n1_lines(data.n1_data(self.root)))
+        elif cmd in ("pause", "resume", "stop"):
+            if not mid or not self.mission_dir(mid):
+                self.msg = "no focused mission"
+            elif cmd == "stop":
+                self.pending_stop = (mid, arg)
+                self.msg = f"stop {mid}? type y or n"
+            else:
+                data.control_data(self.root, mid, cmd, arg)
+                self.msg = f"{cmd} requested for {mid}"
         elif cmd == "missions":
             out = []
             for m in self.snap.get("missions") or []:
@@ -311,6 +349,9 @@ class App:
             elif ch in (curses.KEY_BACKSPACE, "\x7f", "\b", 127, 8):
                 self.buf = self.buf[:-1]
             elif ch == "\x1b":
+                if self.pending_stop:
+                    self.pending_stop = None
+                    self.msg = "stop cancelled"
                 self.view, self.scroll = "transcript", 0
             elif ch == curses.KEY_PPAGE:
                 self.scroll += 10
@@ -340,6 +381,8 @@ def main() -> None:
             print(f"{time.strftime('%H:%M:%S', time.localtime(t))} [{who}] {text}")
         return
     os.environ.setdefault("ESCDELAY", "25")
+    if curses is None:
+        ap.error("interactive TUI requires curses (run on Linux)")
     curses.wrapper(App(root).loop)
 
 

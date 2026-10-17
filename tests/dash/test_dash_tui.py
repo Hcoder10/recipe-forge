@@ -1,9 +1,11 @@
 """TUI logic without curses: event one-liners, notes and answers land in the agreed files."""
 import json
 
-import pytest
+import tempfile
+import unittest
+from pathlib import Path
 
-pytest.importorskip("curses")  # no curses on the Windows laptop; runs on the rig
+from forge.tui import data
 
 from forge.dash import fixtures  # noqa: E402
 from forge.tui.__main__ import App, fmt_event  # noqa: E402
@@ -26,14 +28,14 @@ def test_notes_answers_and_views(tmp_path):
     assert app.current() and app.lines
     mid = app.current()
     app.run_command("please check the reference first")
-    (note,) = [json.loads(x) for x in open(f"{root}/missions/{mid}/operator_notes.jsonl")]
+    (note,) = data.rows(Path(root) / "missions" / mid / "operator_notes.jsonl")
     assert note["text"] == "please check the reference first" and note["to"] == "lead"
     with open(f"{root}/missions/{mid}/inbox.jsonl", "w") as f:
         f.write(json.dumps({"question_id": "q7", "by": "lead", "question": "use GPU 2?"}) + "\n")
     app.run_command("/inbox")
     assert any("q7" in line for line in app.panel)
     app.run_command("/answer q7 yes, work GPU only")
-    (ans,) = [json.loads(x) for x in open(f"{root}/missions/{mid}/answers.jsonl")]
+    (ans,) = data.rows(Path(root) / "missions" / mid / "answers.jsonl")
     assert ans == {"question_id": "q7", "answer": "yes, work GPU only", "t": ans["t"]}
     app.run_command("/inbox")
     assert app.panel == ["no open questions"]
@@ -43,3 +45,157 @@ def test_notes_answers_and_views(tmp_path):
     app.poll()
     assert app.current() == "m001" and any("MISSION END" in x[3] for x in app.lines)
     assert app.run_command("/quit") is False
+
+
+class ExistingTuiTests(unittest.TestCase):
+    def test_event_formatting(self):
+        test_fmt_event_one_liners()
+
+    def test_existing_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            test_notes_answers_and_views(Path(tmp))
+
+
+class CommandDataTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / "state"
+        self.mission = self.root / "missions" / "a"
+        self.mission.mkdir(parents=True)
+        (self.mission / "spec.json").write_text(json.dumps({
+            "recipe_id": "synthetic-recipe", "gpu_class": "synthetic-gpu"}), encoding="utf-8")
+
+    def write_rows(self, path, records):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    def bench(self, ref, cand):
+        return {"result": {"reference": {"decode_tok_s": ref},
+                           "candidate": {"decode_tok_s": cand}}}
+
+    def test_compare_best_paired_reference_and_bars(self):
+        self.write_rows(self.mission / "benches.jsonl", [self.bench(100, 120), self.bench(200, 220),
+                        self.bench(0, 999), self.bench(100, "nan"), {"result": []}])
+        result = data.compare_data(self.root, "a")
+        self.assertTrue(result[0]["quick"]["reference"] == 200)
+        self.assertTrue(result[0]["quick"]["candidate"] == 220)
+        self.assertTrue(abs(result[0]["quick"]["delta"] - 10) < 1e-9)
+        self.assertTrue(result[0]["recipe"] == "synthetic-recipe")
+        lines = data.compare_lines(result)
+        self.assertTrue(any("quick bench (unverified)" in line for line in lines))
+        self.assertTrue(any("#" in line and "|" in line for line in lines))
+        self.assertFalse(any("GATED (verified)" in line for line in lines))
+
+    def test_compare_fleet_verified_then_quick(self):
+        for mid in ("b", "c"):
+            (self.root / "missions" / mid).mkdir()
+        for mid, cand in (("a", 150), ("b", 120), ("c", 130)):
+            self.write_rows(self.root / "missions" / mid / "benches.jsonl", [self.bench(100, cand)])
+        self.write_rows(self.mission / "events.jsonl", [{"kind": "gate_result", "gate_id": "g1",
+                        "verdict": "loss", "delta_pct": -1}])
+        self.write_rows(self.root.parent / "gate" / "ledger.jsonl", [
+            {"gate_id": "g2", "mission_id": "b", "status": "queued"},
+            {"gate_id": "g2", "verdict": "win", "delta_pct": 2}])
+        result = data.compare_data(self.root)
+        self.assertTrue([r["mission"] for r in result] == ["b", "a", "c"])
+        self.assertTrue(len(data.compare_lines(result, fleet=True)) == 3)
+        self.assertTrue(any("GATED (verified)" in line for line in data.compare_lines(result[:1])))
+
+    def test_gate_requests_results_ci_and_partial_updates(self):
+        self.write_rows(self.mission / "gate_requests.jsonl", [{"id": "r1"}, {"id": "r2"}])
+        self.write_rows(self.mission / "events.jsonl", [{"kind": "gate_result", "request_id": "r1",
+                        "gate_id": "g1", "verdict": "win", "delta_pct": 2}])
+        self.write_rows(self.root.parent / "gate" / "ledger.jsonl", [
+            {"gate_id": "g1", "ci": [1, 3]}, {"gate_id": "g1", "delta_pct": None}])
+        result = data.gate_data(self.root)
+        self.assertTrue(len(result) == 2)
+        done = next(r for r in result if r.get("gate_id") == "g1")
+        self.assertTrue(done["delta_pct"] == 2 and done["mission_id"] == "a")
+        self.assertTrue("CI [1, 3]" in data.gate_line(done))
+        self.assertTrue(any(r.get("status") == "requested" for r in result))
+
+    def test_facts_shared_recipe_priority(self):
+        self.write_rows(self.root / "brain" / "facts.jsonl", [
+            {"fact_id": "f1", "recipe_id": "elsewhere", "t": 9, "claim": "synthetic"},
+            {"fact_id": "f2", "recipe_id": "synthetic-recipe", "t": 1, "claim": "synthetic"}])
+        self.assertTrue(data.facts_data(self.root, "a")[0]["fact_id"] == "f2")
+        self.assertTrue(data.facts_data(self.root)[0]["fact_id"] == "f1")
+        self.assertTrue(len(data.facts_lines(data.facts_data(self.root))) == 2)
+
+    def test_invalid_gate_is_visible_but_not_verified(self):
+        self.write_rows(self.mission / "events.jsonl", [
+            {"kind": "gate_result", "gate_id": "bad", "verdict": "invalid"}])
+        result = data.compare_data(self.root, "a")
+        lines = data.compare_lines(result)
+        self.assertTrue(any("invalid" in line for line in lines))
+        self.assertFalse(any("GATED (verified)" in line for line in lines))
+
+    def test_pending_gate_links_submission_to_request(self):
+        self.write_rows(self.mission / "gate_requests.jsonl", [{"id": "r1"}])
+        self.write_rows(self.mission / "events.jsonl", [
+            {"kind": "gate_submitted", "gate_id": "g1", "request_id": "r1"}])
+        self.write_rows(self.root.parent / "gate" / "ledger.jsonl", [
+            {"gate_id": "g1", "status": "running"}])
+        result = data.gate_data(self.root)
+        self.assertTrue(len(result) == 1 and result[0]["status"] == "running")
+
+    def test_n1_stats_and_top_entries(self):
+        self.write_rows(self.root / "winlib" / "entries.jsonl", [
+            {"entry_id": "e1", "mission_id": "a", "outcome": {"kind": "quick_gain", "delta_pct": 3}},
+            {"entry_id": "e2", "mission_id": "b", "outcome": {"kind": "gated_win", "delta_pct": 2}}])
+        self.write_rows(self.root / "winlib" / "reuse.jsonl", [
+            {"entry_id": "e1", "mission_id": "c", "delta_pct": 1},
+            {"entry_id": "e1", "mission_id": "c", "delta_pct": -1}])
+        result = data.n1_data(self.root)
+        self.assertTrue(result["stats"] == {"entries": 2, "missions": 3, "reuse_rate": .5, "help_rate": .5})
+        self.assertTrue(result["entries"][0]["entry_id"] == "e2")
+        self.assertTrue("reuse rate" in data.n1_lines(result)[0])
+
+    def test_missing_malformed_and_partial_files(self):
+        path = self.mission / "benches.jsonl"
+        path.write_bytes(b'null\n[]\ninvalid\n{}\n{"partial":')
+        self.assertTrue(data.rows(path) == [{}])
+        self.assertTrue(data.compare_data(self.root, "a")[0]["quick"] is None)
+        self.assertTrue(data.compare_data(self.root, "missing") == [])
+        self.assertTrue(data.gate_data(self.root) == [])
+        self.assertTrue(data.facts_data(self.root) == [])
+        self.assertTrue(data.n1_data(self.root)["stats"]["entries"] == 0)
+        self.assertTrue(data.mission_dir(self.root, "../a") is None)
+        self.assertTrue(data.state_root(self.root.parent) == self.root)
+
+    def test_pause_resume_stop_contract(self):
+        for action in ("pause", "resume"):
+            data.control_data(self.root, "a", action, "operator reason")
+        with self.assertRaises(ValueError):
+            data.control_data(self.root, "a", "stop")
+        data.control_data(self.root, "a", "stop", confirmed=True)
+        records = data.rows(self.mission / "control.jsonl")
+        self.assertTrue([r["action"] for r in records] == ["pause", "resume", "stop"])
+        self.assertTrue(all(set(r) == {"t", "by", "action", "reason"} and r["by"] == "operator"
+                            and isinstance(r["t"], float) for r in records))
+        self.assertFalse((self.mission / "operator_notes.jsonl").exists())
+        with self.assertRaises(OSError):
+            data.control_data(self.root, "missing", "pause")
+
+    def test_command_routing_and_stop_confirmation(self):
+        app = App(str(self.root))
+        app.focus = "a"
+        for command in ("compare", "compare all", "facts", "gate", "n1"):
+            self.assertTrue(app.run_command("/" + command))
+            self.assertTrue(bool(app.panel))
+        app.run_command("/pause reason")
+        app.run_command("/resume")
+        app.run_command("/stop reason")
+        app.run_command("not an answer")
+        self.assertTrue(len(data.rows(self.mission / "control.jsonl")) == 2)
+        app.run_command("n")
+        app.run_command("/stop reason")
+        app.focus = "missing"
+        app.run_command("y")
+        self.assertTrue(data.rows(self.mission / "control.jsonl")[-1]["action"] == "stop")
+        self.assertFalse((self.mission / "operator_notes.jsonl").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
