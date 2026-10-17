@@ -160,7 +160,9 @@ class RealCtx:
         return None
 
     def watch(self, srv):
-        return GpuWatch(list(self.grant.gpu_uuids), own_unit=srv.job.unit if srv.job else "")
+        job = srv.job
+        pid = job.pid if job and job.containment == "pgroup-fallback" else None
+        return GpuWatch(list(self.grant.gpu_uuids), own_unit=job.unit if job else "", own_pid=pid)
 
 
 def _retain(run_dir: str) -> None:

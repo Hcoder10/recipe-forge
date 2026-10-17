@@ -124,13 +124,42 @@ class GateServer:
 class GpuWatch:
     """Samples the gate GPUs during a timed pass for foreign compute processes."""
 
-    def __init__(self, uuids: list[str], own_unit: str, period: float = 2.0):
+    def __init__(self, uuids: list[str], own_unit: str, period: float = 2.0, own_pid: int | None = None):
         self.uuids = set(u for u in uuids if u)
         self.own_unit = own_unit
+        self.own_pid = own_pid
+        root = self._proc_identity(own_pid) if own_pid else None
+        self.own_start = root[1] if root else None
         self.period = period
         self.foreign: list[dict] = []
         self._stop = threading.Event()
         self._t = None
+
+    @staticmethod
+    def _proc_identity(pid):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+            return int(fields[1]), int(fields[19])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _owns_pid(self, pid):
+        if self.own_pid is None or self.own_start is None:
+            return False
+        root = self._proc_identity(self.own_pid)
+        if root is None or root[1] != self.own_start:
+            return False
+        seen = set()
+        while pid > 1 and pid not in seen:
+            seen.add(pid)
+            info = self._proc_identity(pid)
+            if info is None:
+                return False
+            if pid == self.own_pid:
+                return info[1] == self.own_start
+            pid = info[0]
+        return False
 
     def check_once(self) -> list[dict]:
         import subprocess
@@ -145,6 +174,8 @@ class GpuWatch:
             if len(parts) < 3 or parts[1] not in self.uuids:
                 continue
             pid = int(parts[0])
+            if self._owns_pid(pid):
+                continue
             try:
                 with open(f"/proc/{pid}/cgroup") as f:
                     cg = f.read()
