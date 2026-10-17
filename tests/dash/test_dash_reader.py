@@ -140,3 +140,26 @@ def test_leaderboard_keeps_best_verified_and_ignores_zero_best():
     assert (c["status"], c["best_tok_s"], c["delta_pct"], c["mission"], c["running"]) == ("verified", 110, 10.0, "a", 1)
     (q,) = build_leaderboard([{"id": "r2", "hardware": ["G"]}], [], [], [])
     assert q["status"] == "queued" and q["best_tok_s"] is None
+
+
+def test_gate_ledger_latest_row_per_gate(tmp_path):
+    led = str(tmp_path / "gate" / "ledger.jsonl")
+    _append(led,
+            {"gate_id": "g1", "machine": "rig", "recipe_id": "r:c1", "mission_id": "m1", "kind": "candidate",
+             "status": "queued", "t": 1},
+            {"gate_id": "g2", "machine": "rig", "recipe_id": "r:c1", "kind": "candidate", "status": "queued", "t": 2},
+            {"gate_id": "g1", "status": "running", "t": 3},
+            {"gate_id": "g0", "machine": "rig", "kind": "reference", "status": "done", "verdict": "loss", "t": 0.5})
+    box = str(tmp_path / "results" / "boxes" / "vast-1" / "gate" / "ledger.jsonl")
+    _append(box, {"gate_id": "b1", "recipe_id": "n:c1", "kind": "candidate", "status": "done", "verdict": "win",
+                  "delta_pct": 6.2, "lossless_pass": True, "pairs": 6, "t": 5})
+    r = Reader(str(tmp_path))
+    gates = {g["machine"]: g for g in r.snapshot()["gates"]}
+    rig = gates["rig"]
+    assert rig["running"]["request_id"] == "g1" and [q["request_id"] for q in rig["queued"]] == ["g2"]
+    assert rig["n_verdicts"] == 1 and rig["n_wins"] == 0
+    (v,) = gates["vast-1"]["verdicts"]
+    assert (v["verdict_id"], v["win"], v["lossless"], v["delta_pct"], v["pairs"]) == ("b1", True, True, 6.2, 6)
+    _append(led, {"gate_id": "g1", "status": "done", "verdict": "lossy", "t": 9})
+    rig = {g["machine"]: g for g in r.snapshot()["gates"]}["rig"]
+    assert rig["running"] is None and rig["verdicts"][0]["lossless"] is False

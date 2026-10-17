@@ -395,7 +395,7 @@ def _alert(ev: dict, ts: float | None, mission: str | None, agent: str | None) -
 
 
 def normalize_verdict(v: dict, machine: str | None = None) -> dict:
-    lossless = _pick(v, "lossless", "lossless_ok")
+    lossless = _pick(v, "lossless", "lossless_ok", "lossless_pass")
     if isinstance(lossless, dict):
         ok = _pick(lossless, "ok", "pass", "passed")
         detail = {k: lossless.get(k) for k in ("top1", "kl", "max_regret") if k in lossless}
@@ -433,13 +433,16 @@ def normalize_verdict(v: dict, machine: str | None = None) -> dict:
         "mean_log_gain": gain,
         "delta_pct": delta_pct,
         "threshold": _num(_pick(v, "threshold", "bar")),
+        "threshold_pct": _num(_pick(v, "threshold_pct")),
+        "gain_pct": _num(_pick(v, "gain_pct")),
+        "status": _pick(v, "status"),
         "win": None if win is None else bool(win),
         "lossless": None if ok is None else bool(ok),
         "lossless_detail": detail,
         "confirmed": _pick(v, "confirmed"),
         "tok_s_ref": _num(_pick(v, "tok_s_ref", "ref_tok_s", "baseline_tok_s")),
         "tok_s_cand": _num(_pick(v, "tok_s_cand", "cand_tok_s", "candidate_tok_s")),
-        "reason": _short(_pick(v, "reason", "why", "note"), 160),
+        "reason": _short(_pick(v, "reason", "why", "note", "detail"), 160),
     }
 
 
@@ -637,6 +640,31 @@ class Reader:
             machine = _pick(r, "machine", default=parts[2] if len(parts) > 3 else "?")
             v = normalize_verdict(r, machine)
             g(str(v["machine"]))["verdicts"][v["verdict_id"]] = v
+        # core's gate ledger: append-only, latest row per gate_id is its state (docs/interfaces/core.md)
+        ledger: dict[str, dict] = {}
+        for r in self._jsonl_many("gate_ledger", ["gate/ledger.jsonl", "results/boxes/*/gate/ledger.jsonl"]):
+            gid = r.get("gate_id")
+            if gid is None:
+                continue
+            src = r.get("_src", "").replace("\\", "/").split("/")
+            box = src[src.index("boxes") + 1] if "boxes" in src else None
+            ledger[str(gid)] = {**ledger.get(str(gid), {}), **{k: v for k, v in r.items() if v is not None},
+                                "_box": box}
+        for r in sorted(ledger.values(), key=lambda r: _ts(r.get("t")) or 0):
+            machine = str(_pick(r, "machine", "_box", default="?"))
+            gm = g(machine)
+            gm["_has_ledger"] = True
+            st = str(r.get("status") or "").lower()
+            item = {"request_id": r["gate_id"], "mission": r.get("mission_id"), "recipe": r.get("recipe_id"),
+                    "kind": r.get("kind"), "ts": _ts(r.get("t")), "claim": _short(r.get("claim"), 120),
+                    "bundle": _short(r.get("bundle_hash"), 16)}
+            if st == "queued":
+                gm["queued"].append(item)
+            elif st == "running":
+                gm["running"] = {**item, "started_at": item["ts"], "phase": f"{r.get('kind') or 'gate'}"}
+            else:
+                v = normalize_verdict(r, machine)
+                gm["verdicts"][v["verdict_id"]] = v
         for p, q in self._json_any("gate_queue", ["results/gate/*/queue.json"]):
             machine = os.path.basename(os.path.dirname(p))
             if isinstance(q, dict):
@@ -657,8 +685,9 @@ class Reader:
         out = []
         for gm in by_m.values():
             pending = gm.pop("_pending", [])
-            if not gm.pop("_has_queue", False):
+            if not gm.pop("_has_queue", False) and not gm.pop("_has_ledger", False):
                 gm["queued"] = sorted(pending, key=lambda r: r.get("ts") or 0)
+            gm.pop("_has_ledger", None)
             vs = sorted(gm["verdicts"].values(), key=lambda v: -(v["ts"] or 0))
             gm["n_verdicts"] = len(vs)
             gm["n_wins"] = sum(1 for v in vs if v["win"] and v["lossless"] is not False)
