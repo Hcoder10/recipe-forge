@@ -7,6 +7,8 @@ Infra faults (tool_bug, env_blocked) escalate to the Lead and the human inbox on
 from __future__ import annotations
 
 import json
+import hashlib
+import time
 from collections import defaultdict, deque
 
 READ_TOOLS = {"read", "search", "diff", "facts", "profile", "gate_status", "team_status", "gate_requests"}
@@ -29,6 +31,9 @@ class Detector:
         self.nudges: dict[str, list[str]] = defaultdict(list)
         self.infra_seen: set[str] = set()
         self.counts: dict[str, int] = defaultdict(int)
+        self.started_at = time.monotonic()
+        self.last_measurement: dict[str, float] = {}
+        self.measurement_nudged: dict[str, float] = {}
 
     def take_nudges(self, agent: str) -> list[str]:
         out, self.nudges[agent] = self.nudges[agent], []
@@ -53,27 +58,43 @@ class Detector:
             self.decisions.trigger(signal, f"{agent}: {detail}", source=agent)
             self.strikes[k] = 0
 
+    def check_measurement(self, agent: str, *, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        last = max(self.last_measurement.get(agent, self.started_at),
+                   self.measurement_nudged.get(agent, self.started_at))
+        if now - last >= 15 * 60:
+            self.measurement_nudged[agent] = now
+            self._signal(agent, "no_measurement", "Run bench or kernel_test to test the current hypothesis.")
+
     def observe(self, agent: str, role: str, name: str, args: dict, res: dict) -> None:
         sig = name + ":" + json.dumps(args, sort_keys=True, default=str)[:400]
         h = self.hist[agent]
         h.append(sig)
         cls = res.get("class")
         if cls in ("tool_bug", "env_blocked"):
-            self._signal(agent, cls, f"{name}: {res.get('error', '')}", infra=True)
+            self._signal(agent, cls, f"{name}: tool or infrastructure failure; inspect the tool contract.", infra=True)
         if list(h).count(sig) >= self.repeat_n and name not in ("team_status", "gate_status", "gate_requests"):
             self._signal(agent, "repeat_call", f"{name} called with the same arguments {list(h).count(sig)} "
                                                "times recently")
             h.clear()
-        if cls == "agent_error":
+        if role == "worker" and (res.get("ok") is False or cls in ("agent_error", "tool_bug", "env_blocked")):
             fs = self.fail_streak[agent]
-            fs.append(name)
-            if len(fs) >= self.repeat_n and len(set(fs[-self.repeat_n:])) == 1:
-                self._signal(agent, "repeat_failure", f"{name} failed {len(fs)} times in a row: "
-                                                      f"{res.get('error', '')}")
+            # Compare opaque signatures, never echo raw tool errors into a nudge.
+            signature = hashlib.sha256(json.dumps([name, cls, res.get("error")],
+                                                  sort_keys=True, default=str).encode()).digest()
+            if fs and fs[-1] != signature:
+                fs.clear()
+            fs.append(signature)
+            if len(fs) >= self.repeat_n:
+                self._signal(agent, "repeat_failure", "Change approach: the same error repeated.")
                 fs.clear()
         else:
             self.fail_streak[agent] = []
         if role == "worker":
+            now = time.monotonic()
+            if name in ("bench", "kernel_test") and res.get("ok"):
+                self.last_measurement[agent] = now
+            self.check_measurement(agent, now=now)
             if name in READ_TOOLS:
                 self.read_streak[agent] += 1
                 if self.read_streak[agent] >= self.read_streak_n:
@@ -96,5 +117,4 @@ class Detector:
             return
         miss = abs(actual - predicted) > max(2.0, abs(predicted))
         if miss:
-            self._signal(agent, "prediction_miss", f"{bench_id}: predicted {predicted:+.1f}%, measured "
-                                                   f"{actual:+.1f}%")
+            self._signal(agent, "prediction_miss", "Prediction calibration needs review; consult the evidence identifier " + bench_id)

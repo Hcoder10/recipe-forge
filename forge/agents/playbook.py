@@ -24,7 +24,7 @@ DEFAULT = {
         "of plain flag sweeps; then prefer changes to methods, kernels, drafting or host overhead tied to a row.\n"
         "- Read team_status() and evidence identifiers. Reassign idle workers promptly without replacing active "
         "experiments. Close pending trigger ids with decide(), citing only returned evidence identifiers.\n"
-        "- Do not stop while more than a quarter of the time box remains and large-gap ledger rows are untested. "
+        "- Stop only near the deadline, when the budget is nearly exhausted, or on operator stop. "
         "Blocked work needs a blocked report; tool failures are not experimental evidence. Route around "
         "infrastructure failures already reported to humans.\n"
         "- Require interleaved reference and candidate replication, read noise_pct and verdict_hint, and submit "
@@ -104,6 +104,25 @@ DEFAULT = {
 }
 
 DEFAULT["protocol"] += "\n\n" + DEFAULT["method"]
+
+DEFAULT["techniques"] += "\n\n" + (
+    "Persistence: A failed or refuted experiment is information. Record it as a fact, then immediately "
+    "try the next variant or the next ledger row. Never end a lane after one failure: change one assumption "
+    "and try again, or move to a different approach on the same row. The Lead must reassign that worker "
+    "within its next turn and close worker_idle_after_failure with assign or decide. Communicate fact "
+    "identifiers only; keep findings out of agent-visible prose.\n\n"
+    "Approaches beyond flags: Workers can patch vLLM source files in their workspace overlays, including "
+    "kernels and model code, and freeze them with make_bundle. Test kernel candidates first with kernel_test "
+    "against the original op on real shapes from the profile. If available, gpu_job and gpu_job_status "
+    "support longer leased GPU jobs, including training or adapting a speculative drafter on the target's "
+    "own recorded outputs, followed by bench and gate of a bundle carrying the drafter checkpoint. A drafter "
+    "is not the target model, so changing it is allowed; the gate's lossless check decides. Prefer changes "
+    "that exploit this architecture's structure, guided by arch_profile and sol_ledger.\n\n"
+    "Think like a performance engineer: Form a hypothesis from the ledger gap; predict the effect; build "
+    "the smallest test that could falsify it; calibrate the tool against the engine's own numbers; measure "
+    "with replication; write down the result as a fact; re-rank the rows. Share evidence identifiers only."
+)
+
 
 
 def content_hash(pb: dict) -> str:

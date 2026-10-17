@@ -140,7 +140,7 @@ class GateQueue:
         import math
         import os
         try:
-            threshold = float(os.environ.get("FORGE_FASTTRACK_PCT", "8"))
+            threshold = float(os.environ.get("FORGE_FASTTRACK_PCT", "5"))
             delta = float(result.get("delta_pct"))
             return (result.get("confirmed") is True and result.get("verdict_hint") == "gain"
                     and math.isfinite(threshold) and threshold >= 0 and math.isfinite(delta)
@@ -319,7 +319,11 @@ class Team:
     def stop_blockers(self) -> list[str]:
         """Do not abandon unfinished lanes early; operator stop is independent."""
         m = self.r.mission
-        if m.minutes_left() <= m.time_box_min * 0.25:
+        remaining = m.minutes_left()
+        budget = self.r.meter.budget_usd
+        if remaining < 5 or (budget is not None and self.r.meter.cost_usd >= budget * 0.95):
+            return []
+        if remaining <= m.time_box_min * 0.25:
             return []
         if done_mod.audit(m.criteria, self.r.services.gate.ledger(mission_id=m.id))["met"]:
             return []
@@ -330,7 +334,11 @@ class Team:
             blocked = {r["task"]["lane"] for r in self.reports
                        if r.get("task") and r["status"] in ("blocked", "failed")}
             untested = self.assigned_lanes - measured - blocked - {"arch"}
-        return active + sorted(untested)
+        blockers = active + sorted(untested)
+        if blockers:
+            self.r.agents["lead"].add_event_message(
+                f"Stop refused: {remaining:.0f} minutes remain. Pick the next ledger row or a new approach.")
+        return blockers
 
     def status(self) -> dict:
         m = self.r.mission
@@ -600,6 +608,70 @@ class MissionRunner:
             for ev in self.wakers.values():
                 ev.set()
 
+    def _supervise_workers(self) -> None:
+        """Track report transitions and idle deadlines without copying experiment findings."""
+        if self.finished.is_set() or self.paused.is_set():
+            return
+        team = self.services.team
+        if not isinstance(team, Team):
+            return
+        now = time.monotonic()
+        with team.lock:
+            if not hasattr(self, "_idle_since"):
+                self._idle_since = {}
+                self._reports_seen = 0
+            reports = team.reports[self._reports_seen:]
+            self._reports_seen += len(reports)
+            pending = self.decisions.pending()
+            for report in reports:
+                worker = report["by"]
+                if report["status"] in ("failed", "refuted") and team.tasks.get(worker) is None:
+                    self.decisions.trigger(
+                        "worker_idle_after_failure",
+                        f"{worker}: assign the next variant or ledger row this turn, or close with decide.",
+                        source=worker)
+                    self.wake("lead")
+            for worker, task in team.tasks.items():
+                self.detector.check_measurement(worker, now=now)
+                if task is not None:
+                    self._idle_since.pop(worker, None)
+                    for trigger in pending:
+                        if trigger["source"] == worker and trigger["kind"] in (
+                                "worker_idle", "worker_idle_after_failure"):
+                            self.decisions.close(trigger["id"], "assign")
+                    continue
+                since = self._idle_since.setdefault(worker, now)
+                if now - since >= 120:
+                    if not any(t["source"] == worker and t["kind"] in (
+                            "worker_idle", "worker_idle_after_failure") for t in self.decisions.pending()):
+                        self.decisions.trigger("worker_idle", f"{worker}: assign a task or decide the next approach.",
+                                               source=worker)
+                    self.wake("lead")
+                    self._idle_since[worker] = now
+
+    def _handle_lead_stop(self) -> bool:
+        request = self.decisions.stop_requested
+        if not request:
+            return False
+        if self.finished.is_set():
+            return True
+        remaining = self.mission.minutes_left()
+        budget = self.meter.budget_usd
+        if remaining < 5 or (budget is not None and self.meter.cost_usd >= budget * 0.95):
+            self.end("lead stop: persistence threshold reached")
+            return True
+        self.decisions.stop_requested = None
+        # A refused stop must not silently consume the work it claimed to resolve.
+        with self.decisions.lock:
+            for tid in request.get("trigger_ids", []):
+                trigger = self.decisions.triggers.get(tid)
+                if trigger:
+                    trigger["open"] = True
+                    trigger.pop("closed_by", None)
+        self.agents["lead"].add_event_message(
+            f"Stop refused: {remaining:.0f} minutes remain. Pick the next ledger row or a new approach.")
+        return False
+
     def _lead_loop(self) -> None:
         lead = self.agents["lead"]
         lead.add_event_message("The mission starts now. Plan the first round and assign every worker a task.")
@@ -608,11 +680,12 @@ class MissionRunner:
             for _ in range(4):        # a Lead "turn" is a few calls; it must close pending triggers
                 if not self._wait_unpaused():
                     return
+                self._supervise_workers()
                 before = {t["id"] for t in self.decisions.pending()}
                 out = lead.step(self._status(lead))
-                if self.decisions.stop_requested:
-                    self.end(f"lead stop: {self.decisions.stop_requested.get('evidence', '')[:200]}")
+                if self._handle_lead_stop():
                     return
+                self._supervise_workers()
                 still = {t["id"] for t in self.decisions.pending()}
                 if not out["called"] and not still:
                     break
@@ -622,6 +695,9 @@ class MissionRunner:
                     break
                 if before and still == before and not out["called"]:
                     lead.add_event_message("Pending triggers are still open; call decide() on them.")
+            if any(t["kind"] == "worker_idle_after_failure" for t in self.decisions.pending()):
+                lead.add_event_message("Close worker_idle_after_failure with assign or decide this turn.")
+                continue
             self.wakers["lead"].wait(every)
             self.wakers["lead"].clear()
 
@@ -700,6 +776,7 @@ class MissionRunner:
                 if not threads[0].is_alive():
                     self.end(self.end_reason or "lead thread ended")
                     break
+                self._supervise_workers()
                 for frac in (0.5, 0.8, 0.9):
                     if m.frac_used() >= frac and frac not in warned:
                         warned.add(frac)
