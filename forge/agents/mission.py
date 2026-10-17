@@ -313,6 +313,7 @@ class MissionRunner:
         self.wakers: dict[str, threading.Event] = {}
         self.team_cfg = TeamConfig.from_dict(spec.get("team"))
         self.playbook = pb_mod.load(spec.get("playbook"), self.root / "playbooks")
+        pb_mod.save(self.playbook, self.root / "playbooks")   # every version that ran stays loadable by hash
         recipe = normalize_recipe(spec["recipe"], spec.get("variant"), spec.get("bench_prompts"))
         if spec.get("recipe_id"):
             recipe["id"] = spec["recipe_id"]
@@ -367,6 +368,21 @@ class MissionRunner:
         self.services.detector = self.detector
         self.registry = build_registry()
         self.brief = mission_brief(self.mission)
+        self.win_entries, self.traits, self.model_cfg = [], {}, None
+        try:
+            from forge.agents import winlib
+            if snap:
+                try:
+                    self.model_cfg = json.loads(self.executor.read_text(posixpath.join(snap, "config.json")))
+                except Exception as e:
+                    self.log("winlib_error", stage="model_config", error=str(e))
+            self.traits = winlib.arch_traits(recipe, self.model_cfg)
+            self.win_entries = winlib.relevant(self.traits, self.mission.gpu_class)
+            if self.win_entries:
+                self.brief += "\n\n" + winlib.render(self.win_entries)
+            self.log("winlib_injected", entry_ids=[e["entry_id"] for e in self.win_entries], traits=self.traits)
+        except Exception as e:
+            self.log("winlib_error", stage="inject", error=str(e))
         self.protocol_text = self.playbook["protocol"].replace("{bar}", str(self.playbook["knobs"]
                                                                             ["verifier_bar_pct"]))
         if self.playbook.get("techniques"):
@@ -571,7 +587,22 @@ class MissionRunner:
                     break
                 time.sleep(self.gate_poll_s)
             self.wait_gates = False
+        new_entries = []
+        try:
+            from forge.agents import winlib
+            new_entries = winlib.distill(self.dir, self.mission.recipe, self.model_cfg, self.mission.gpu_class)
+        except Exception as e:
+            self.log("winlib_error", stage="distill", error=str(e))
+        try:
+            for bench in self.mission.benches.values():
+                entry_id = winlib.match_entry(bench.get("config_delta"), bench.get("env"), self.win_entries)
+                if entry_id:
+                    winlib.record_reuse(m.id, entry_id, bench["bench_id"],
+                                        (bench.get("result") or {}).get("delta_pct"))
+        except Exception as e:
+            self.log("winlib_error", stage="reuse", error=str(e))
         row = self.row()
+        row["winlib"] = {"injected": len(self.win_entries), "new_entries": len(new_entries)}
         self.log("mission_end", reason=self.end_reason, row=row)
         (self.dir / "row.json").write_text(json.dumps(row, indent=1, default=str))
         return row
