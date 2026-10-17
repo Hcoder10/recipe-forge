@@ -182,7 +182,7 @@ class MissionState:
         if member:
             name = _pick(ev, "name", "agent", "id")
         else:
-            name = _pick(ev, "agent", "member", "who", "by", "worker")
+            name = _pick(ev, "agent", "worker", "member", "who", "by")  # worker_task: by=lead, worker=w1
         role = _pick(ev, "role")
         if name is None and role is None:
             return None
@@ -517,7 +517,9 @@ class Reader:
 
     # -- sources
     def _poll_missions(self) -> None:
-        dirs = self._glob("missions/*/")
+        dirs = [d for d in self._glob("missions/*/")
+                if any(os.path.exists(os.path.join(d, f)) for f in ("events.jsonl", "spec.json", "mission.json",
+                                                                       "row.json"))]  # skip bare workspaces
         for d in dirs:
             mid = os.path.basename(os.path.normpath(d))
             ms = self.missions.get(mid)
@@ -585,7 +587,10 @@ class Reader:
 
         rows = self._jsonl_many("leaderboard", ["results/leaderboard.jsonl", "results/rows/*.jsonl",
                                                 "results/*/rows.jsonl"])
-        rows += [d for _, d in self._json_any("rows", ["results/rows/*.json"]) if isinstance(d, dict)]
+        for _, d in self._json_any("rows", ["results/rows/*.json", "results/boxes/*/rows/*.json",
+                                           "results/leaderboard.json"]):
+            items = d if isinstance(d, list) else (_pick(d, "rows", default=None) if isinstance(d, dict) else None)
+            rows += [x for x in (items if items is not None else [d]) if isinstance(x, dict)]
         for ms in self.missions.values():  # missions/<id>/row.json, or the row in mission_end
             if ms.row:
                 rows.append({**ms.meta, "mission_id": ms.id, **ms.row})
@@ -752,10 +757,13 @@ class Reader:
             series = [series[int(i * step)] for i in range(240)] + [series[-1]]
 
         rentals: dict[str, dict] = {}
-        for _, ms_doc in self._json_any("machines", ["fleet/machines.json", "results/machines.json"]):
+        for _, ms_doc in self._json_any("machines", ["fleet/machines.json", "fleet/machines/*.json"]):
             items = ms_doc if isinstance(ms_doc, list) else (_pick(ms_doc, "machines", default=[]) or [])
             if isinstance(ms_doc, dict) and not items:
-                items = [dict(v, name=k) for k, v in ms_doc.items() if isinstance(v, dict)]
+                if "name" in ms_doc:  # fleet/machines/<name>.json: one machine
+                    items = [ms_doc]
+                else:  # {name: machine}
+                    items = [dict(v, name=k) for k, v in ms_doc.items() if isinstance(v, dict)]
             for m in items:
                 if not isinstance(m, dict):
                     continue
@@ -766,7 +774,7 @@ class Reader:
             rentals[key] = {**rentals.get(key, {}), **{k: v for k, v in r.items() if v is not None}}
         vast = []
         for key, m in rentals.items():
-            rate = _num(_pick(m, "usd_per_hr", "dph", "usd_hr", "rate"))
+            rate = _num(_pick(m, "usd_per_hour", "usd_per_hr", "dph", "usd_hr", "rate"))
             if rate is None and not _pick(m, "rental_id", "instance", "spent_usd"):
                 continue  # a local machine, not a rental
             started = _ts(_pick(m, "started_at", "start_ts"))
@@ -869,11 +877,16 @@ def build_leaderboard(recipes: list[dict], rows: list[dict], queue: list, missio
         return table[key]
 
     for r in recipes:
-        for gpu in _gpu_classes(r) or ["?"]:
-            c = cell(r.get("id"), gpu)
-            c["model"] = _pick(r, "model")
-            met = _pick(r, "metric")
-            c["metric"] = _pick(met, "name", "kind") if isinstance(met, dict) else met
+        variants = [v for v in (_pick(r, "variants", default=[]) or []) if isinstance(v, dict) and v.get("name")]
+        met = _pick(r, "metric", default=_pick(_pick(r, "workload", default={}) or {}, "metric"))
+        met = _pick(met, "name", "kind") if isinstance(met, dict) else met
+        expanded = [(f"{r.get('id')}.{v['name']}", _pick(v, "metric", default=met)) for v in variants] or \
+            [(r.get("id"), met)]
+        for rid, metric in expanded:
+            for gpu in _gpu_classes(r) or ["?"]:
+                c = cell(rid, gpu)
+                c["model"] = _pick(r, "model")
+                c["metric"] = metric
     for q in queue or []:
         if isinstance(q, dict):
             cell(_pick(q, "recipe", "recipe_id"), _pick(q, "gpu_class", "gpu"))

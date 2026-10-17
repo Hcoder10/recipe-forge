@@ -5,7 +5,8 @@ const SRC = new URLSearchParams(location.search).get("src") || "live";
 const Q = SRC === "live" ? "" : `?src=${encodeURIComponent(SRC)}`;
 let snap = null;
 let skew = 0;            // server clock minus client clock, seconds
-let prevStatus = {};     // leaderboard key -> status, to flash rows that just became verified
+let prevStatus = {};
+let showQueued = false;     // leaderboard key -> status, to flash rows that just became verified
 
 // ------------------------------------------------------------------ helpers
 const $ = (id) => document.getElementById(id);
@@ -102,7 +103,12 @@ function renderLeaderboard(s) {
     if (snap && prevStatus[key] && prevStatus[key] !== "verified" && r.status === "verified") flash.add(key);
   }
   prevStatus = next;
-  const body = rows.map((r) => {
+  // queued rows are the untouched catalog: show a few, fold the rest into one clickable line
+  const active = rows.filter((r) => r.status !== "queued"), queued = rows.filter((r) => r.status === "queued");
+  const nQ = showQueued ? queued.length : (active.length ? 4 : 8);
+  const shown = active.concat(queued.slice(0, nQ));
+  const rest = queued.length - Math.min(nQ, queued.length);
+  const body = shown.map((r) => {
     const key = `${r.recipe}|${r.gpu_class}`;
     const unit = r.metric ? `<span class="unit">${esc(String(r.metric).replace(/_tok_s$/, "").replace("_", " "))}</span>` : "";
     const proof = r.verdict_id
@@ -112,7 +118,7 @@ function renderLeaderboard(s) {
     const runNote = r.running && r.status === "verified" ? `<span class="run-note">+${r.running} running</span>` : "";
     return `<tr class="${esc(r.status)}${flash.has(key) ? " flash" : ""}">
       <td><div class="rid">${esc(r.recipe)}</div><div class="model">${esc(r.model || "")}</div></td>
-      <td><span class="chip gpu">${esc(r.gpu_class)}</span></td>
+      <td><span class="chip gpu"${tipAttr(r.gpu_class)}>${esc(gpuName(r.gpu_class))}</span></td>
       <td class="r num">${fmt(r.baseline_tok_s)}${r.baseline_tok_s != null ? unit : ""}</td>
       <td class="r num best">${r.status === "verified" ? fmt(r.best_tok_s) : '<span class="muted">—</span>'}</td>
       <td class="delta"><div style="display:flex;align-items:center;gap:.6em"><div style="flex:1">${deltaBar(r.status === "verified" ? r.delta_pct : null, max)}</div><b class="num" style="min-width:4.2em;text-align:right">${esc(dtxt)}</b></div></td>
@@ -124,7 +130,15 @@ function renderLeaderboard(s) {
   $("leaderboard").innerHTML = `<table class="lb">
     <thead><tr><th class="model-col">Recipe</th><th>GPU</th><th class="r">NVIDIA baseline tok/s</th><th class="r">Best verified tok/s</th>
     <th>Delta</th><th class="change">Change</th><th class="proof-col">Gate proof</th><th>Status</th></tr></thead>
-    <tbody>${body}</tbody></table>`;
+    <tbody>${body}${rest > 0 || showQueued ? `<tr class="more"><td colspan="8"><a href="#" id="toggle-queued">${showQueued ? "fold queued rows" : `+ ${rest} more queued recipe × GPU rows`}</a></td></tr>` : ""}</tbody></table>`;
+  const tq = $("toggle-queued");
+  if (tq) tq.onclick = (e) => { e.preventDefault(); showQueued = !showQueued; renderLeaderboard(snap); };
+}
+const GPU_NAMES = { rtxpro6000_95g: "RTX PRO 6000", rtx5090_32g: "RTX 5090" };
+function gpuName(k) {
+  if (!k) return "?";
+  if (/\s/.test(k)) return k;
+  return GPU_NAMES[k] || String(k).replace(/_(\d+)g$/i, "").replace(/^rtx/i, "RTX ").replace(/pro/i, "PRO ").toUpperCase();
 }
 
 // ------------------------------------------------------------------ 2. missions

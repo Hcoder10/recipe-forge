@@ -119,6 +119,9 @@ svg.deltabar text { font: 700 0.95em var(--sans); fill: var(--ink); }
 svg.deltabar .track { fill: var(--surface-3); }
 svg.deltabar .bar { fill: var(--good); }
 svg.deltabar .bar.neg { fill: var(--critical); }
+.lb tr.more td { padding: 0.5em 0.7em; font-size: 0.8em; }
+.lb tr.more a { color: var(--muted); text-decoration: none; }
+.lb tr.more a:hover { color: var(--ink); }
 tr.flash td { animation: flash 3s ease-out 1; }
 @keyframes flash { 0% { background: rgba(12, 163, 12, 0.35); } 100% { background: transparent; } }
 
