@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import itertools
+import json
+import re
 import threading
 from pathlib import Path
 
@@ -27,6 +29,17 @@ class Decisions:
         self.counter = itertools.count(1)
         self.stop_requested: dict | None = None
         self.rows: list[dict] = []
+        self.contexts: dict[str, dict] = {}
+
+    def set_context(self, by: str, text: str, **facts) -> None:
+        self.contexts[by] = {"context": text[:6000], **facts}
+
+    def record(self, by: str, action: str, options, citations: str, **fields) -> dict:
+        row = events.append(self.path, {**self.contexts.get(by, {"context": ""}),
+                                       "by": by, "action": action, "options": options,
+                                       "evidence_ids": evidence_ids(citations), **fields})
+        self.rows.append(row)
+        return row
 
     def trigger(self, kind: str, summary: str, source: str = "", infra: bool = False) -> str:
         with self.lock:
@@ -64,6 +77,8 @@ class Decisions:
         ids = [str(t).strip() for t in (trigger_ids or [])]
         closed, ignored = [], []
         with self.lock:
+            options = [{"id": t["id"], "kind": t["kind"]}
+                       for t in self.triggers.values() if t["open"]]
             for tid in ids:
                 t = self.triggers.get(tid) or self.triggers.get(tid.upper()) or self.triggers.get("T" + tid)
                 if t and t["open"]:
@@ -72,14 +87,55 @@ class Decisions:
                     closed.append(t["id"])
                 else:
                     ignored.append(tid)
-        row = events.append(self.path, {"by": by, "decision": d, "trigger_ids": closed, "ignored": ignored,
-                                        "evidence": evidence[:1000], "plan": plan[:1500]})
-        self.rows.append(row)
+        row = self.record(by, d, options, evidence, decision=d, trigger_ids=closed, ignored=ignored,
+                          evidence=evidence[:1000], plan=plan[:1500])
         self.log("decision", by=by, decision=d, trigger_ids=closed, evidence=evidence[:500], plan=plan[:500])
         if d == "stop":
             self.stop_requested = row
         return {"recorded": d, "closed": closed, "ignored_ids": ignored, "still_pending": [t["id"] for t in
                                                                                           self.pending()]}
+
+
+def evidence_ids(text: str) -> list[str]:
+    """Keep citations as identifiers, without copying findings into extra fields."""
+    return list(dict.fromkeys(re.findall(r"\b(?:[BTRNGQ]\d+(?:-[\w-]+)?|gate-[\w-]+|f-[0-9a-f]{10})\b", text)))
+
+
+def labels_for(mission_dir: Path) -> list[dict]:
+    """Label only decisions supported by subsequent mission facts; never feed labels to agents."""
+    directory = Path(mission_dir)
+    requests = {r["id"]: r for r in events.read(directory / "gate_requests.jsonl")
+                if r.get("event") == "submit" and r.get("id")}
+    results = [r for r in events.read(directory / "events.jsonl") if r.get("kind") == "gate_result"]
+    labeled = []
+    for row in events.read(directory / "decisions.jsonl"):
+        action = row.get("action", row.get("decision"))
+        label = "unknown"
+        rid = row.get("request_id")
+        req = requests.get(rid, {})
+        bundle = row.get("bundle", req.get("bundle"))
+        bundle_hash = row.get("bundle_hash", req.get("hash"))
+        for result in results:
+            if result.get("t", 0) < row.get("t", 0):
+                continue
+            other = requests.get(result.get("request_id"), {})
+            same_request = rid is not None and result.get("request_id") == rid
+            same_bundle = ((bundle_hash and bundle_hash == other.get("hash")) or
+                           (bundle and bundle == result.get("bundle")))
+            verdict = result.get("verdict")
+            if action == "approve" and same_request and verdict in ("win", "loss", "lossy"):
+                label = "good" if verdict == "win" else "bad"
+                break
+            if action == "reject" and same_bundle and verdict == "win":
+                label = "bad"
+                break
+        if action == "stop" and row.get("minutes_left", 0) > 0 and row.get("pending_candidates") == []:
+            label = "good"
+        labeled.append({**row, "label": label})
+    with (directory / "decisions_labeled.jsonl").open("w", encoding="utf-8") as out:
+        for row in labeled:
+            out.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return labeled
 
 
 class Inbox:

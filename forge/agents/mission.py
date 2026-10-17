@@ -21,7 +21,7 @@ from forge.agents import events, playbook as pb_mod
 from forge.agents.agent import Agent
 from forge.agents.brain import Brain
 from forge.agents.config import TeamConfig, load_secrets, profile as get_profile, state_root
-from forge.agents.decisions import Decisions, Inbox, Notes
+from forge.agents.decisions import Decisions, Inbox, Notes, labels_for
 from forge.agents.detector import Detector
 from forge.agents.events import EventLog
 from forge.agents.llm import BudgetExceeded, LLMClient, LLMError, Meter
@@ -183,6 +183,9 @@ class GateQueue:
             req["status"] = "approved" if approve else "rejected"
             req["review"] = reason[:500]
         events.append(self.path, {"event": "review", "id": request_id, "approve": approve, "reason": reason[:500]})
+        self.r.decisions.record(ctx.agent, "approve" if approve else "reject", [request_id], reason,
+                                request_id=request_id, bundle=req["bundle"], bundle_hash=req["hash"],
+                                reason=reason[:500])
         self.r.log("gate_review", request_id=request_id, approve=approve, reason=reason[:300], by=ctx.agent)
         worker = self.r.agents.get(req["by"])
         if not approve:
@@ -308,6 +311,8 @@ class MissionRunner:
         (self.dir / "spec.json").write_text(json.dumps(spec, indent=1, default=str))
         self.log = EventLog(self.dir / "events.jsonl", mid)
         self.finished = threading.Event()
+        self.paused = threading.Event()
+        self._operator_offsets: dict[str, int] = {}
         self.wait_gates = False
         self.gate_poll_s = float(spec.get("gate_poll_s", 15))
         self.wakers: dict[str, threading.Event] = {}
@@ -424,6 +429,58 @@ class MissionRunner:
                                  vram_gb=float(self.spec.get("bench_vram_gb", 90)))
 
     # -- coordination -----------------------------------------------------------------------------
+    def _operator_rows(self, filename: str):
+        """Read complete appended lines only; retry a partial final line next tick."""
+        path = self.dir / filename
+        try:
+            with path.open("rb") as stream:
+                stream.seek(self._operator_offsets.get(filename, 0))
+                while True:
+                    line = stream.readline()
+                    if not line.endswith(b"\n"):
+                        break
+                    self._operator_offsets[filename] = stream.tell()
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if isinstance(row, dict) and row.get("by") == "operator":
+                        yield row
+        except FileNotFoundError:
+            return
+
+    def _poll_operator(self) -> None:
+        for row in self._operator_rows("control.jsonl"):
+            action = row.get("action")
+            if action not in ("pause", "resume", "stop"):
+                continue
+            reason = row.get("reason", "")
+            self.log("operator_" + action, by="operator", reason=reason)
+            if action == "stop":
+                self.end(f"operator stop: {reason}")
+                return
+            if action == "pause":
+                self.paused.set()
+            else:
+                self.paused.clear()
+                for name in self.agents:
+                    self.wake(name)
+        for row in self._operator_rows("operator_notes.jsonl"):
+            target, text = row.get("to"), row.get("text")
+            if not isinstance(text, str):
+                continue
+            names = list(self.agents) if target == "all" else [target]
+            for name in names:
+                if name in self.agents:
+                    self.agents[name].add_event_message("OPERATOR NOTE: " + text)
+                    self.wake(name)
+            self.log("operator_note", by="operator", to=target)
+
+    def _wait_unpaused(self) -> bool:
+        while self.paused.is_set() and not self.finished.is_set():
+            self.finished.wait(0.05)
+        return not self.finished.is_set()
+
     def wake(self, name: str) -> None:
         ev = self.wakers.get(name)
         if ev:
@@ -438,7 +495,14 @@ class MissionRunner:
         if agent.role == "verifier":
             ex.append(f"Requests pending review: {', '.join(self.services.gate_queue.pending()) or 'none'}. "
                       f"Bar: {self.services.gate_queue.bar_text()}.")
-        return status_block(self.mission, agent.role, pend, self.detector.take_nudges(agent.name), ex)
+        text = status_block(self.mission, agent.role, pend, self.detector.take_nudges(agent.name), ex)
+        queue = self.services.gate_queue
+        with queue.lock:
+            candidates = [r["id"] for r in queue.reqs.values()
+                          if r["status"] in ("pending_review", "approved", "gated")]
+        self.decisions.set_context(agent.name, text, minutes_left=self.mission.minutes_left(),
+                                   pending_candidates=candidates)
+        return text
 
     def _guard(self, fn, name):
         def run():
@@ -474,7 +538,7 @@ class MissionRunner:
         every = float(self.team_cfg.lead_every_s)
         while not self.finished.is_set():
             for _ in range(4):        # a Lead "turn" is a few calls; it must close pending triggers
-                if self.finished.is_set():
+                if not self._wait_unpaused():
                     return
                 before = {t["id"] for t in self.decisions.pending()}
                 out = lead.step(self._status(lead))
@@ -502,6 +566,8 @@ class MissionRunner:
                 self.wakers[name].wait(5)
                 self.wakers[name].clear()
                 continue
+            if not self._wait_unpaused():
+                return
             out = w.step(self._status(w))
             if out["called"]:
                 idle_replies = 0
@@ -524,7 +590,7 @@ class MissionRunner:
                 self.wakers["verifier"].clear()
                 continue
             for _ in range(6):
-                if self.finished.is_set() or not self.services.gate_queue.pending():
+                if not self._wait_unpaused() or not self.services.gate_queue.pending():
                     break
                 v.step(self._status(v))
 
@@ -541,11 +607,15 @@ class MissionRunner:
                                     daemon=True)]
         threads += [threading.Thread(target=self._guard(lambda n=n: self._worker_loop(n), n), name=n, daemon=True)
                     for n in m.worker_names]
+        self._poll_operator()
         for t in threads:
             t.start()
         warned = set()
         try:
             while not self.finished.is_set():
+                self._poll_operator()
+                if self.finished.is_set():
+                    break
                 if m.minutes_left() <= 0:
                     self.end("time box used up")
                     break
@@ -603,6 +673,10 @@ class MissionRunner:
                                         (bench.get("result") or {}).get("delta_pct"))
         except Exception as e:
             self.log("winlib_error", stage="reuse", error=str(e))
+        try:
+            labels_for(self.dir)
+        except Exception:
+            self.log("decision_labels_error")
         row = self.row()
         row["winlib"] = {"injected": len(self.win_entries), "new_entries": len(new_entries)}
         self.log("mission_end", reason=self.end_reason, row=row)
