@@ -13,7 +13,7 @@ Mission `1017-143651-bolt-74b-lilicorr-c1-rig`: a team of Nemotron 3.5 Super-VL 
 
 | Bench | Change (found by the agents) | Candidate tok/s | Fresh reference tok/s | Delta | Reference noise | Verdict hint | Bundle | Gate |
 |---|---|---|---|---|---|---|---|---|
-| B13 | `--async-scheduling` | 325.5 | 314.9 | **+3.68%** | 0.63% | gain (confirmed) | `720eb19ae50c6d74` | `g10171554-80f05a`: PENDING |
+| B13 | `--async-scheduling` | 325.5 | 314.9 | **+3.68%** | 0.63% | gain (confirmed) | `720eb19ae50c6d74` | `g10171554-80f05a`: **LOSS**, mean -0.97%, 99.9% CI on log-gain [-6.7%, +4.7%] (df_null 8). The quick-bench gain did not survive paired AB/BA timing. |
 | B14 | `--attention-backend TRITON_ATTN` | 313.9 | 305.6 | **+3.38%** | 1.28% | gain (confirmed) | `e40ad4fce88f7f2b` | `g10171554-d1f899`: PENDING |
 
 "Confirmed" means the bench re-measured the reference in the same job after the candidate (A/B/A), and
