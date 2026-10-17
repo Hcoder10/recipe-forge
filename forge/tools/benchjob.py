@@ -190,21 +190,36 @@ class _Plain:
                 pass
 
 
+SEED_CACHES = ("flashinfer", "b12x")   # prebuilt JIT kernels; the sandbox has no nvcc to rebuild them
+
+
+def seed_caches(cache: Path) -> None:
+    """One shared, writable bench cache per machine, seeded once from the user's prebuilt kernel caches."""
+    dst = cache / "home" / ".cache"
+    dst.mkdir(parents=True, exist_ok=True)
+    (cache / "vllm").mkdir(parents=True, exist_ok=True)
+    for name in SEED_CACHES:
+        src = Path.home() / ".cache" / name
+        if src.is_dir() and not (dst / name).exists():
+            subprocess.run(["cp", "-a", str(src), str(dst / name)], check=False)
+
+
 class _Sandboxed:
     """Server inside forge.sandbox (Landlock + its own systemd scope); candidates carry agent code."""
 
     def __init__(self, argv, env, cwd, spec, label, work: Path, ro_extra: list[str], port_range):
         from forge.sandbox import Spec as SbxSpec, launch  # noqa: PLC0415
         venv = str(Path(spec["python"]).parent.parent)
-        cache = Path(spec["work_dir"]).parent.parent / "benchcache"
-        cache.mkdir(parents=True, exist_ok=True)
+        cache = Path(spec.get("cache_dir") or Path(spec["work_dir"]).parent.parent / "benchcache")
+        seed_caches(cache)
         ro = [venv] + [p for p in [spec.get("hf_home"), cwd, *ro_extra] if p]
         gpu = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
         job_dir = work / f"sbx-{label}"
         home = job_dir / "home"
         senv = {k: v for k, v in env.items() if k not in ("PATH", "HOME", "CUDA_VISIBLE_DEVICES")}
         senv.update({"VLLM_CACHE_ROOT": str(cache / "vllm"), "HF_MODULES_CACHE": str(home / "hf_modules"),
-                     "HF_HUB_OFFLINE": "1"})
+                     "HF_HUB_OFFLINE": "1", "FLASHINFER_WORKSPACE_BASE": str(cache / "home"),
+                     "XDG_CACHE_HOME": str(cache / "home" / ".cache")})
         if spec.get("hf_home"):
             senv["HF_HOME"] = spec["hf_home"]
         for k in ("LANDLORD_LEASE_ID", "FORGE_LEASE_IDS", "FORGE_GRANT_ID"):

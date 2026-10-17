@@ -34,6 +34,7 @@ class RemoteBenchRunner:
                        "served_model_name": rec["serve"].get("served_model_name")},
             "workload": rec["workload"], "prompts": mission.bench_prompts, "n_prompts": n_prompts,
             "ref_cache_dir": str(PurePosixPath(self.forge_root) / "state" / "refcache"),
+            "cache_dir": str(PurePosixPath(self.forge_root) / "state" / "benchcache"),
             "work_dir": work, "fresh_reference": fresh_reference,
             "serve_cwd": getattr(mission, "serve_cwd", None), "sandbox": self.sandbox,
             "hf_home": getattr(mission, "hf_home", None),

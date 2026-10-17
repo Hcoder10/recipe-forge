@@ -54,6 +54,8 @@ class MissionState:
     bundles: dict = field(default_factory=dict)
     bench_log: Path | None = None
     serve_cwd: str | None = None
+    forge_root: str = ""
+    sandbox_tools: bool = False
     hf_home: str | None = None
     _pkgs: set | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -339,6 +341,8 @@ class MissionRunner:
             executor=self.executor, readable_roots=list(spec.get("readable_roots") or []),
             bench_log=self.dir / "benches.jsonl")
         m = self.mission
+        m.forge_root = machine.get("forge_root") or str(self.root.parent)
+        m.sandbox_tools = bool(spec.get("sandbox_tools", machine.get("forge_root") is not None))
         m.hf_home = spec.get("hf_home") or (machine.get("env") or {}).get("HF_HOME")
         if not m.bench_prompts.startswith("/") and machine.get("forge_root"):
             m.bench_prompts = posixpath.join(machine["forge_root"], m.bench_prompts)

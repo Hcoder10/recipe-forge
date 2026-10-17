@@ -314,9 +314,28 @@ def t_report(ctx, summary, status="done"):
     return ctx.services.team.report(ctx.agent, summary, status)
 
 
-def t_sh(ctx, cmd, timeout_s=300):
+def _sandboxed(ctx, argv: list[str], timeout_s: int, label: str):
+    """argv inside forge.sandbox on the target when the mission asks for it (always on real machines)."""
     m = ctx.mission
-    r = ctx.executor.run(cmd, cwd=m.ws, timeout_s=min(900, int(timeout_s)), mission_id=m.id, label="sh")
+    ex = ctx.executor
+    if not getattr(m, "sandbox_tools", False):
+        return ex.run(argv, cwd=m.ws, timeout_s=timeout_s, mission_id=m.id, label=label)
+    venv = posixpath.dirname(posixpath.dirname(m.python))
+    wrap = [m.python, "-m", "forge.tools.sbxrun", "--ws", m.ws, "--venv", venv, "--timeout", str(timeout_s)]
+    for ro in [m.hf_home, *m.readable_roots]:
+        if ro:
+            wrap += ["--ro", ro]
+    if m.hf_home:
+        wrap += ["--env", f"HF_HOME={m.hf_home}", "--env", "HF_HUB_OFFLINE=1"]
+    r = ex.run(wrap + ["--"] + argv, cwd=m.forge_root, env={"PYTHONPATH": m.forge_root}, timeout_s=timeout_s + 60,
+               mission_id=m.id, label=label)
+    if r.rc == 199 and "FORGE_INFRA" in (r.stderr or ""):
+        r.infra_error = r.stderr.strip().splitlines()[-1][:300]
+    return r
+
+
+def t_sh(ctx, cmd, timeout_s=300):
+    r = _sandboxed(ctx, ["bash", "-c", cmd], min(900, int(timeout_s)), "sh")
     if r.infra_error:
         raise EnvBlocked(f"sh could not run: {r.infra_error}")
     return {"rc": r.rc, "stdout": r.stdout[-4000:], "stderr": r.stderr[-1500:]}
@@ -326,8 +345,7 @@ def t_py(ctx, code, timeout_s=300):
     m = ctx.mission
     path = posixpath.join(m.ws, "scratch", f"py_{int(time.time() * 1000)}.py")
     ctx.executor.write_text(path, code)
-    r = ctx.executor.run([m.python, path], cwd=m.ws, timeout_s=min(900, int(timeout_s)), mission_id=m.id,
-                         label="py")
+    r = _sandboxed(ctx, [m.python, path], min(900, int(timeout_s)), "py")
     if r.infra_error:
         raise EnvBlocked(f"py could not run: {r.infra_error}")
     return {"rc": r.rc, "stdout": r.stdout[-4000:], "stderr": r.stderr[-1500:]}
