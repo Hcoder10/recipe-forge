@@ -255,7 +255,17 @@ class LLMClient:
             if tools:
                 body["tools"] = tools
                 body["tool_choice"] = tool_choice or "auto"
-            data = self._call_with_retries(body)
+            try:
+                data = self._call_with_retries(body)
+            except ContextTooLong:
+                raise
+            except LLMError:
+                fb = model.as_fallback()
+                if fb is None:
+                    raise
+                model = fb                      # priced and logged as the fallback model
+                body["model"] = fb.model_id
+                data = self._call_with_retries(body)
         latency = time.time() - t0
         try:
             choice = data["choices"][0]
