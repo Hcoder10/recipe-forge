@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recipe-forge</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d0d0d'/%3E%3Cpath d='M8 22l6-12 4 8 3-5 3 9' stroke='%2376b900' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="fixture-banner" hidden>[fixture] FAKE DATA for demo only. Nothing on this page came from a real run.</div>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M5 23l7-14 5 9 4-6 6 11"/></svg>
+    <div>
+      <h1>recipe-forge</h1>
+      <div class="tagline">Gate-verified, lossless speedups to NVIDIA's Nemotron serving recipes</div>
+    </div>
+  </div>
+  <div class="kpis" id="kpis"></div>
+  <div class="conn">
+    <a id="src-toggle" class="src" href="?src=fixture">fixture view</a>
+    <span id="conn-dot" class="dot off" title="stream"></span>
+    <span id="clock" class="clock">--:--:--</span>
+  </div>
+</header>
+
+<main class="grid">
+  <section class="panel hero" id="p-leaderboard" data-key="1">
+    <h2><span class="k">1</span>Leaderboard <small>recipe × GPU class · NVIDIA baseline vs best gate-verified</small></h2>
+    <div class="body" id="leaderboard"></div>
+  </section>
+
+  <section class="panel c7" id="p-missions" data-key="2">
+    <h2><span class="k">2</span>Live missions <small id="missions-sub"></small></h2>
+    <div class="body" id="missions"></div>
+  </section>
+
+  <section class="panel c5" id="p-gates" data-key="3">
+    <h2><span class="k">3</span>Gates <small>queue and verdicts per machine</small></h2>
+    <div class="body" id="gates"></div>
+  </section>
+
+  <section class="panel c4" id="p-decisions" data-key="4">
+    <h2><span class="k">4</span>Decisions <small>continue · replan · stop · ask_human</small></h2>
+    <div class="body feed" id="decisions"></div>
+  </section>
+
+  <section class="panel c4" id="p-alerts" data-key="5">
+    <h2><span class="k">5</span>Alerts <small>drift and infra</small></h2>
+    <div class="body feed" id="alerts"></div>
+  </section>
+
+  <section class="panel c4" id="p-brain" data-key="7">
+    <h2><span class="k">7</span>Shared Brain <small id="brain-sub"></small></h2>
+    <div class="body" id="brain"></div>
+  </section>
+
+  <section class="panel c6" id="p-n1" data-key="6">
+    <h2><span class="k">6</span>Version N+1 <small>playbook versions on unseen recipes</small></h2>
+    <div class="body" id="n1"></div>
+  </section>
+
+  <section class="panel c6" id="p-spend" data-key="8">
+    <h2><span class="k">8</span>Spend <small>Crusoe inference · Vast rentals</small></h2>
+    <div class="body" id="spend"></div>
+  </section>
+</main>
+<footer class="foot" id="foot"></footer>
+<div id="tip" class="tip" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
