@@ -28,9 +28,6 @@ serve:
       --reasoning-parser-plugin nano_v3_reasoning_parser.py \
       --reasoning-parser nano_v3
   notes: "Card: \"We need vllm>=0.15.1 for this model.\" Jetson Thor / DGX Spark: NGC vllm container 26.02-py3. Parser is downloaded from the BF16 repo on both cards. Image tag not named by the card (v0.15.1 is the nearest official tag meeting the minimum). Reasoning off via enable_thinking=False."
-published: none
-published_searched: ["https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16", "https://huggingface.co/blog/nvidia/nemotron-3-nano-4b", "https://www.jetson-ai-lab.com/models/nemotron3-nano-4b/"]
-published_note: "The HF blog's only absolute number ('18 tokens/s' on Jetson Orin Nano) is for the Q4_K_M GGUF checkpoint with Llama.cpp, not BF16; the FP8-vs-BF16 1.8X claim is recorded in nano3-4b-fp8.yaml."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}
@@ -41,3 +38,7 @@ hardware:
 variants:
   - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
   - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
+published: null
+published_note: No checkpoint-specific absolute serving number verified in the reviewed
+  primary sources; see the human-only target report. Relative ratios and acceptance
+  lengths are not serving records.

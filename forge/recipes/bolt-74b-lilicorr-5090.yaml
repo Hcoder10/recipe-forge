@@ -1,0 +1,133 @@
+id: bolt-74b-lilicorr-5090
+title: NVIDIA Nemotron 3.5 Bolt 74B-A9B 24GB + LiLiCorr (RTX 5090, c1)
+model: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB
+revision: main
+drafter:
+  model: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
+  note: Official companion drafter; DFlash method with seven speculative tokens.
+engine: vllm
+weights_gb: 25.05
+vllm:
+  min_version: null
+  image: vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989
+  run_image: vllm/vllm-openai:nightly-77154ca6116ae34cbfe314beef1016bde9b63989
+  env:
+    VLLM_USE_V2_MODEL_RUNNER: '1'
+  extra_files:
+  - url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB/resolve/main/ultra_v3_reasoning_parser.py
+    dest: ultra_v3_reasoning_parser.py
+serve:
+  args:
+  - --trust-remote-code
+  - --load-format
+  - auto
+  - --tensor-parallel-size
+  - '1'
+  - --max-model-len
+  - '262144'
+  - --max-num-seqs
+  - '1'
+  - --enable-chunked-prefill
+  - --kv-cache-dtype
+  - fp8
+  - --linear-backend
+  - b12x
+  - --moe-backend
+  - b12x
+  - --attention-backend
+  - FLASHINFER
+  - --mamba-backend
+  - flashinfer
+  - --mamba-ssm-cache-dtype
+  - bfloat16
+  - --mamba-cache-dtype
+  - bfloat16
+  - --mamba-cache-mode
+  - align
+  - --seed
+  - '42'
+  - --allowed-local-media-path
+  - /
+  - --limit-mm-per-prompt
+  - '{"video":1,"image":1}'
+  - --video-pruning-rate
+  - '0.5'
+  - --media-io-kwargs
+  - '{"video":{"fps":2,"num_frames":256}}'
+  - --enable-auto-tool-choice
+  - --tool-call-parser
+  - qwen3_coder
+  - --reasoning-parser-plugin
+  - ultra_v3_reasoning_parser.py
+  - --reasoning-parser
+  - ultra_v3
+  - --speculative-config
+  - '{"method":"dflash","model":"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr","num_speculative_tokens":7,"rejection_sample_method":"standard","attention_backend":"FLASHINFER","draft_load_config":{"load_format":"auto"}}'
+  source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB#vllm
+  quoted: |
+    export VLLM_USE_V2_MODEL_RUNNER=1
+
+    vllm serve nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB \
+      --trust-remote-code \
+      --load-format auto \
+      --tensor-parallel-size 1 \
+      --max-model-len 262144 \
+      --max-num-seqs 1 \
+      --enable-chunked-prefill \
+      --kv-cache-dtype fp8 \
+      --linear-backend b12x \
+      --moe-backend b12x \
+      --attention-backend FLASHINFER \
+      --mamba-backend flashinfer \
+      --mamba-ssm-cache-dtype bfloat16 \
+      --mamba-cache-dtype bfloat16 \
+      --mamba-cache-mode align \
+      --seed 42 \
+      --allowed-local-media-path / \
+      --limit-mm-per-prompt '{"video":1,"image":1}' \
+      --video-pruning-rate 0.5 \
+      --media-io-kwargs '{"video":{"fps":2,"num_frames":256}}' \
+      --enable-auto-tool-choice \
+      --tool-call-parser qwen3_coder \
+      --reasoning-parser-plugin ultra_v3_reasoning_parser.py \
+      --reasoning-parser ultra_v3 \
+      --speculative-config '{"method":"dflash","model":"nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr","num_speculative_tokens":7,"rejection_sample_method":"standard","attention_backend":"FLASHINFER","draft_load_config":{"load_format":"auto"}}'
+  notes: 'Card: "This model requires the following vLLM version or newer. Please use this command." (docker image
+    nightly-77154ca6...). Quick Start also runs, inside the container, `pip install b12x` and `vllm download-kernels`
+    before serving (needed for --linear-backend b12x / --moe-backend b12x). Card publishes only this drafter (DFlash/LiLiCorr)
+    command; no drafter-free vLLM command is published. Reasoning: enable_thinking True/False; medium effort via
+    {"enable_thinking": true, "medium_effort": true}.'
+chat:
+  system_prompt: null
+  chat_template_kwargs:
+    enable_thinking: false
+hardware:
+  fits:
+  - rtx5090_32g
+  tensor_parallel: 1
+  adapt:
+    rtx5090_32g:
+      set:
+        --max-model-len: '4096'
+        --gpu-memory-utilization: '0.95'
+      why: Operator-specified 32GB capacity adaptation for fixed KV/cache allocation. Apply identically to reference
+        and every candidate; not an optimization result.
+  notes: Select gpu_class rtx5090_32g through forge.recipes.get/load_all. Raw YAML retains the official 262144 context;
+    normalize_recipe alone does not apply hardware.adapt. Startup has not been executed.
+variants:
+- name: c1
+  concurrency: 1
+  max_tokens: 512
+  metric: decode_tok_s
+published:
+  value: 83.99
+  metric: output_tok_s
+  unit: tokens/s
+  hardware: RTX Spark (Surface Laptop Ultra, 128GB); llama.cpp; NOT RTX 5090
+  concurrency: null
+  isl: null
+  osl: null
+  source_url: https://research.nvidia.com/labs/nemotron/Nemotron-3.5-Bolt-24GB/
+  date: '2026-10-15'
+published_note: 'Primary NVIDIA source; 83.99 rounds to 84. Context only: llama.cpp on RTX Spark, not a same-hardware
+  vLLM baseline. Concurrency and exact ISL/OSL not stated in the table.'

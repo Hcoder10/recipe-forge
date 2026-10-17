@@ -250,8 +250,16 @@ def notes_lines(root, mid):
         for note in notes_data(root, mid)]
 
 
+def safe_text(value):
+    value = str(value if value is not None else "-")
+    value = re.sub(r"(?i)(bearer\s+)[^\s,}]+", r"\1[REDACTED]", value)
+    value = re.sub(r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|token|password|secret|authorization)[\"']?\s*[:=]\s*)[\"']?[^\s,}\"']+", r"\1[REDACTED]", value)
+    value = re.sub(r"(?:sk-|hf_)[A-Za-z0-9_-]{16,}", "[REDACTED]", value)
+    return ''.join(c if c.isprintable() else ' ' for c in value)
+
+
 def text(value):
-    return " ".join(str(value if value is not None else "-").split())
+    return " ".join(safe_text(value).split())
 
 
 def metric(value):
@@ -283,13 +291,18 @@ def compare_lines(data, fleet=False):
             out[-1] += (f" | {label} {metric(gate.get('delta_pct'))}%"
                         f" | quick bench (unverified) {metric(quick.get('delta'))}%")
             continue
-        out.append("quick bench (unverified)  delta " + metric(quick.get("delta")) + "%")
+        out.append("UNVERIFIED / QUICK BENCH")
+        out.append("+" + "-" * 54 + "+")
+        out.append("|  DELTA  " + metric(quick.get("delta")) + "%" + " " * 8 + "quick bench (unverified)")
+        out.append("+" + "-" * 54 + "+")
         out.append(f"{'REFERENCE decode tok/s':<40} | BEST CANDIDATE decode tok/s")
         out.append(f"{metric(quick.get('reference')):<40} | {metric(quick.get('candidate'))}")
         scale = max(quick.get("reference", 0), quick.get("candidate", 0), 1)
         bars = ["#" * round(36 * quick.get(k, 0) / scale) for k in ("reference", "candidate")]
         out.extend([f"{bars[0]:<40} | {bars[1]}"] * 2)
         label = "GATED (verified)" if verified(gate) else "GATED result"
+        if gate.get('verdict') in ('win', 'gated_win') and verified(gate):
+            out.append("VERIFIED / GATE WIN  " + metric(gate.get('delta_pct')) + "%")
         out.append(label + "  " + gate_line(gate) if gate else "No gated measurement yet")
         out.append("")
     return out or ["no missions yet"]
@@ -315,3 +328,185 @@ def n1_lines(data):
                    f"{text(row.get('mission_id'))} / {text(row.get('recipe_id'))} / {text(row.get('gpu_class'))} "
                    f"{text(where) if where else ''}")
     return out
+
+
+def _short(value, limit=120):
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, default=str)
+    return text(value)[:limit]
+
+
+QUIET_KINDS = {"llm_call", "compaction", "done_locked"}
+
+
+def _role(ev: dict) -> str:
+    r = str(ev.get("role") or "").lower()
+    if r:
+        return r
+    who = str(ev.get("agent") or ev.get("by") or ev.get("worker") or "").lower()
+    for k in ("lead", "verifier", "worker"):
+        if who.startswith(k):
+            return k
+    return "worker" if who[:1] == "w" and who[1:].isdigit() else "system"
+
+
+def fmt_event(ev: dict) -> tuple[str, str, str] | None:
+    """(role, tag, text) for one event, or None to hide it."""
+    k = str(ev.get("kind") or ev.get("type") or "")
+    if k in QUIET_KINDS:
+        return None
+    who = ev.get("agent") or ev.get("by") or ev.get("worker") or "system"
+    role = _role(ev)
+    if k == "tool_call":
+        args = _short(ev.get("args"), 70)
+        res = ev.get("error") or ev.get("result")
+        ok = "" if ev.get("ok", True) else " FAILED"
+        text = f"{ev.get('tool')} {args}{ok} -> {_short(res, 90)}" if res else f"{ev.get('tool')} {args}{ok}"
+        if ev.get('tool') in ('bench', 'bench_pair') and isinstance(res, dict):
+            delta = number(res.get('delta_pct'))
+            text = f"{ev.get('tool')}{ok} -> delta {metric(delta)}% | {globals()['text'](res.get('verdict_hint'))} | quick / unverified"
+    elif k == "decision":
+        text = f"DECISION {str(ev.get('decision', '?')).upper()}: {_short(ev.get('plan') or ev.get('rationale'), 140)}"
+    elif k in ("detector", "trigger", "tool_bug", "error"):
+        infra = " [INFRA]" if ev.get("infra") or k in ("tool_bug", "error") else ""
+        text = (f"ALERT{infra} {ev.get('signal') or ev.get('trigger_kind') or k}: "
+                f"{_short(ev.get('detail') or ev.get('summary') or ev.get('error'), 120)}")
+    elif k == "worker_task":
+        who = ev.get("worker") or who
+        role = "worker"
+        text = f"task [{ev.get('lane')}] {_short(ev.get('task'), 130)}"
+    elif k.startswith("gate"):
+        role = "gate" if k == "gate_result" else role
+        bits = [ev.get("gate_id"), ev.get("verdict"), ev.get("delta_pct") is not None and f"{number(ev['delta_pct']) or 0:+.2f}%"]
+        text = f"{k.upper()} " + " ".join(str(b) for b in bits if b) + \
+            (f" {_short(ev.get('claim') or ev.get('reason'), 90)}" if ev.get("claim") or ev.get("reason") else "")
+    elif k == "ask_human":
+        role = "human"
+        text = f"ASK HUMAN [{ev.get('question_id')}] {_short(ev.get('question'), 140)}  (/answer {ev.get('question_id')} ...)"
+    elif k == "human_answer":
+        role = "operator"
+        text = f"answer [{ev.get('question_id')}] {_short(ev.get('answer'), 140)}"
+    elif k == "mission_start":
+        text = "MISSION START " + _short(ev.get("playbook"), 20)
+    elif k == "mission_ending":
+        text = f"ending: {ev.get('reason')}"
+    elif k == "mission_end":
+        row = ev.get("row") or {}
+        d = (row.get("done") or {}).get("status")
+        text = f"MISSION END {d}: baseline {row.get('baseline')} best {row.get('best')} delta {row.get('delta_pct')}%"
+    elif k == "worker_report":
+        text = f"report: {_short(ev.get('report') or ev.get('summary') or ev.get('text'), 140)}"
+    else:
+        rest = {kk: v for kk, v in ev.items() if kk not in ("t", "kind", "mission_id", "agent", "role", "by")}
+        text = f"{k} {_short(rest, 130)}"
+    return role, str(who), globals()["text"](text)
+
+
+
+COMMANDS = ('home', 'missions', 'mission', 'compare', 'gate', 'facts', 'n1', 'pause',
+            'resume', 'stop', 'steer', 'notes', 'inbox', 'answer', 'leaderboard', 'help', 'quit')
+
+
+def completions(prefix):
+    return ['/' + command for command in COMMANDS if ('/' + command).startswith(prefix)] if prefix.startswith('/') else []
+
+
+def clock_text(stamp):
+    try:
+        return time.strftime('%H:%M:%S', time.localtime(number(stamp) or 0))
+    except (ValueError, OSError, OverflowError):
+        return '--:--:--'
+
+
+def agent_lines(mission):
+    return [f"{text(a.get('name'))} | lane {text(a.get('lane'))} | {text(a.get('task') or a.get('tool') or 'waiting')}"
+            for a in mission.get('team', []) if isinstance(a, dict)] or ['Lead | waiting for agent activity']
+
+
+def fleet_data(root, snapshot, now=None):
+    """Operator-only fleet projections. Never persist these into agent files."""
+    now = time.time() if now is None else now
+    gates = gate_data(root)
+    out = []
+    for mission in snapshot.get('missions', []):
+        mid = mission['id']
+        path = mission_dir(root, mid)
+        events = rows(path / 'events.jsonl') if path else []
+        benches = rows(path / 'benches.jsonl') if path else []
+        best = None
+        for bench in benches:
+            result = mapping(bench.get('result'))
+            ref = number(mapping(result.get('reference')).get('decode_tok_s'))
+            cand = number(mapping(result.get('candidate')).get('decode_tok_s'))
+            if ref is not None and ref > 0 and cand is not None and cand >= 0:
+                delta = (cand / ref - 1) * 100
+                if best is None or delta > best['delta']:
+                    best = {'delta': delta, 'hint': result.get('verdict_hint') or bench.get('verdict_hint') or 'quick'}
+        ended = next((e for e in reversed(events) if e.get('kind') == 'mission_end'), None)
+        running = ended is None and mission.get('status') in ('running', 'active', 'ending', 'paused')
+        start = number(mission.get('started_at'))
+        finish = number(mapping(ended).get('t')) or number(mission.get('last_ts')) or now
+        elapsed = max(0, (now if running else finish) - start) if start is not None else None
+        deadline = number(mission.get('deadline'))
+        box = max(0, deadline - start) if deadline is not None and start is not None else None
+        recent = [e for e in events if (number(e.get('t')) or 0) >= now - 900]
+        blocked = sum(e.get('kind') == 'env_blocked' or e.get('signal') == 'env_blocked' for e in recent)
+        errors = sum(e.get('kind') in ('tool_bug', 'error', 'tool_error') or
+                     (e.get('kind') == 'tool_call' and (e.get('ok') is False or bool(e.get('error')))) for e in recent)
+        last_bench = max([number(b.get('t')) or 0 for b in benches] + [start or now])
+        alerts = []
+        if running:
+            if blocked >= 2:
+                alerts.append('env_blocked x' + str(blocked))
+            if errors >= 2:
+                alerts.append('tool errors x' + str(errors))
+            if now - last_bench >= 900:
+                alerts.append('no bench 15m')
+        related = [g for g in gates if g.get('mission_id') == mid]
+        gate = related[-1] if related else {}
+        status = gate.get('verdict') or gate.get('status') or ('queued' if mission.get('pending_gate') else 'none')
+        status = {'requested': 'queued', 'submitted': 'queued', 'gated_win': 'win', 'gated_loss': 'loss'}.get(status, status)
+        out.append({**mission, 'state': 'running' if running else 'ended', 'elapsed': elapsed,
+                    'box': box, 'benches': len(benches), 'quick': best, 'gate': status, 'alerts': alerts})
+    return out
+
+
+def duration(seconds):
+    return '-' if seconds is None else f'{int(max(0, seconds) // 60)}m'
+
+
+def fleet_columns(width):
+    return (8, 6, 8, 5, 1, 9, 2, 10, 6, 5) if width < 100 else (13, 10, 16, 10, 7, 11, 4, 17, 7, 7)
+
+
+def cells(values, width):
+    def cell(value, size):
+        value = text(value)
+        return (value if len(value) <= size else value[:size - 1] + '~').ljust(size)
+    return ' '.join(cell(v, n) for v, n in zip(values, fleet_columns(width)))
+
+
+def fleet_header(width=120):
+    return '  ' + cells(('MISSION', 'BOX', 'RECIPE', 'GPU', 'S', 'TIME/BOX', 'B#', 'QUICK/HINT', 'GATE', '$'), width)
+
+
+def fleet_line(row, width=120):
+    quick = mapping(row.get('quick'))
+    delta = '-' if not quick else f"{quick['delta']:+.1f}%/{text(quick.get('hint'))}"
+    state = row['state'] if width >= 100 else ('R' if row['state'] == 'running' else 'E')
+    values = [row.get(k) for k in ('id', 'machine', 'recipe', 'gpu_class')]
+    values += [state, f"{duration(row['elapsed'])}/{duration(row['box'])}", row['benches'], delta, row['gate'], metric(row.get('usd'))]
+    return cells(values, width) + (' ! ' + ', '.join(row['alerts']) if row['alerts'] else '')
+
+
+def home_lines(fleet, snapshot):
+    vast = mapping(mapping(snapshot.get('spend')).get('vast'))
+    return [f"FORGE FLEET | {len(fleet)} missions | Vast ${metric(vast.get('burn_usd_per_hr'))}/h",
+            fleet_header()] + [fleet_line(r, 10000) for r in fleet] if fleet else ['FORGE FLEET', 'No missions yet.']
+
+
+def fleet_snapshot(reader):
+    snapshot = reader.snapshot()
+    snapshot['missions'] = sorted((m.view(time.time()) for m in reader.missions.values()),
+                                 key=lambda m: (m['status'] not in ('running', 'active', 'ending'), -(m.get('last_ts') or 0)))
+    return snapshot

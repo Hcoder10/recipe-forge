@@ -39,52 +39,6 @@ serve:
       --tool-call-parser qwen3_coder \
       --reasoning-parser nemotron_v3
   notes: "Card section \"vLLM > 2x H100 (up to 1M Context Length)\". Uses the native MTP head (--speculative-config.method mtp, 3 tokens); no separate drafter download. Card: \"For one H200, use the same command with --tensor-parallel-size 1.\" Card: \"To compare with standard decoding, remove the speculative configuration while keeping ... other server settings the same.\" Image nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2 or v0.32.0."
-published:
-  - metric: "relative_speedup"
-    value: 5
-    units: "x throughput vs open models in its size category"
-    gpu: "single GPU (model not stated)"
-    concurrency: null
-    isl_osl: null
-    engine: null
-    precision: "not stated in source"
-    source: "https://developer.nvidia.com/blog/nvidia-nemotron-3-5-super-vl-powers-specialized-agents-with-multimodal-reasoning/"
-    quote: "On a single GPU, this model delivers up to 5x higher throughput for agentic tasks"
-    note: "Developer blog names only 'Nemotron 3.5 Super VL'; the checkpoint precision (BF16/NVFP4) behind these figures is not stated."
-  - metric: "output_tok_s"
-    value: 600
-    units: "tokens/s (stated as 'over 600 TPS')"
-    gpu: null
-    concurrency: null
-    isl_osl: "100K input (Figure 1 alt text)"
-    engine: "Baseten endpoint"
-    precision: "not stated in source"
-    source: "https://developer.nvidia.com/blog/nvidia-nemotron-3-5-super-vl-powers-specialized-agents-with-multimodal-reasoning/"
-    quote: "Figure 1: Nemotron 3.5 Super VL delivers over 600 TPS on Artificial Analysis Intelligence Index agentic tasks on the Baseten endpoint"
-    note: "Developer blog names only 'Nemotron 3.5 Super VL'; the checkpoint precision (BF16/NVFP4) behind these figures is not stated."
-  - metric: "tok_s_per_user"
-    value: 50
-    units: "tokens/s/user (operating point)"
-    gpu: "16x B200"
-    concurrency: null
-    isl_osl: null
-    engine: "NVIDIA Dynamo (version not stated)"
-    precision: "not stated in source"
-    source: "https://developer.nvidia.com/blog/nvidia-nemotron-3-5-super-vl-powers-specialized-agents-with-multimodal-reasoning/"
-    quote: "On 16 NVIDIA B200 GPUs at 50 tokens per second per user ... serves up to 8x as many users while reducing first-token latency by 85%"
-    note: "Developer blog names only 'Nemotron 3.5 Super VL'; the checkpoint precision (BF16/NVFP4) behind these figures is not stated. Relative claims at this point: 8x users, 85% lower TTFT (vs baseline serving, not detailed)."
-  - metric: "relative_speedup"
-    value: 4
-    units: "x faster task completion (coding, 10,000 tasks)"
-    gpu: "B200"
-    concurrency: null
-    isl_osl: null
-    engine: null
-    precision: "not stated in source"
-    source: "https://developer.nvidia.com/blog/nvidia-nemotron-3-5-super-vl-powers-specialized-agents-with-multimodal-reasoning/"
-    quote: "Figure 3: Nemotron 3.5 Super VL uses higher throughput and token efficiency to deliver 4x faster task completion"
-    note: "Developer blog names only 'Nemotron 3.5 Super VL'; the checkpoint precision (BF16/NVFP4) behind these figures is not stated."
-published_note: "HF card publishes no throughput or MTP acceptance numbers for the 2x H100 MTP recipe."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}
@@ -96,3 +50,7 @@ variants:
   - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
   - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
   - {name: c16, concurrency: 16, max_tokens: 512, metric: output_tok_s}
+published: null
+published_note: No checkpoint-specific absolute serving number verified in the reviewed
+  primary sources; see the human-only target report. Relative ratios and acceptance
+  lengths are not serving records.

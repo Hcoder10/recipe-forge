@@ -21,67 +21,7 @@ from forge.dash.reader import JsonlTail, Reader, _short, _ts
 from forge.tui import data
 
 ROLE_COLOR = {"lead": 1, "worker": 2, "verifier": 3, "gate": 4, "system": 5, "operator": 6, "human": 6}
-QUIET_KINDS = {"llm_call", "compaction", "done_locked"}
-
-
-def _role(ev: dict) -> str:
-    r = str(ev.get("role") or "").lower()
-    if r:
-        return r
-    who = str(ev.get("agent") or ev.get("by") or ev.get("worker") or "").lower()
-    for k in ("lead", "verifier", "worker"):
-        if who.startswith(k):
-            return k
-    return "worker" if who[:1] == "w" and who[1:].isdigit() else "system"
-
-
-def fmt_event(ev: dict) -> tuple[str, str, str] | None:
-    """(role, tag, text) for one event, or None to hide it."""
-    k = str(ev.get("kind") or ev.get("type") or "")
-    if k in QUIET_KINDS:
-        return None
-    who = ev.get("agent") or ev.get("by") or ev.get("worker") or "system"
-    role = _role(ev)
-    if k == "tool_call":
-        args = _short(ev.get("args"), 70)
-        res = ev.get("error") or ev.get("result")
-        ok = "" if ev.get("ok", True) else " FAILED"
-        text = f"{ev.get('tool')} {args}{ok} -> {_short(res, 90)}" if res else f"{ev.get('tool')} {args}{ok}"
-    elif k == "decision":
-        text = f"DECISION {str(ev.get('decision', '?')).upper()}: {_short(ev.get('plan') or ev.get('rationale'), 140)}"
-    elif k in ("detector", "trigger", "tool_bug", "error"):
-        infra = " [INFRA]" if ev.get("infra") or k in ("tool_bug", "error") else ""
-        text = (f"ALERT{infra} {ev.get('signal') or ev.get('trigger_kind') or k}: "
-                f"{_short(ev.get('detail') or ev.get('summary') or ev.get('error'), 120)}")
-    elif k == "worker_task":
-        who = ev.get("worker") or who
-        role = "worker"
-        text = f"task [{ev.get('lane')}] {_short(ev.get('task'), 130)}"
-    elif k.startswith("gate"):
-        role = "gate" if k == "gate_result" else role
-        bits = [ev.get("gate_id"), ev.get("verdict"), ev.get("delta_pct") is not None and f"{ev['delta_pct']:+.2f}%"]
-        text = f"{k.upper()} " + " ".join(str(b) for b in bits if b) + \
-            (f" {_short(ev.get('claim') or ev.get('reason'), 90)}" if ev.get("claim") or ev.get("reason") else "")
-    elif k == "ask_human":
-        role = "human"
-        text = f"ASK HUMAN [{ev.get('question_id')}] {_short(ev.get('question'), 140)}  (/answer {ev.get('question_id')} ...)"
-    elif k == "human_answer":
-        role = "operator"
-        text = f"answer [{ev.get('question_id')}] {_short(ev.get('answer'), 140)}"
-    elif k == "mission_start":
-        text = "MISSION START " + _short(ev.get("playbook"), 20)
-    elif k == "mission_ending":
-        text = f"ending: {ev.get('reason')}"
-    elif k == "mission_end":
-        row = ev.get("row") or {}
-        d = (row.get("done") or {}).get("status")
-        text = f"MISSION END {d}: baseline {row.get('baseline')} best {row.get('best')} delta {row.get('delta_pct')}%"
-    elif k == "worker_report":
-        text = f"report: {_short(ev.get('report') or ev.get('summary') or ev.get('text'), 140)}"
-    else:
-        rest = {kk: v for kk, v in ev.items() if kk not in ("t", "kind", "mission_id", "agent", "role", "by")}
-        text = f"{k} {_short(rest, 130)}"
-    return role, str(who), text
+fmt_event = data.fmt_event
 
 
 class App:
@@ -94,7 +34,12 @@ class App:
         self.lines: list[tuple[float, str, str, str]] = []
         self.buf = ""
         self.msg = "type /help for commands"
-        self.view = "transcript"           # or an info panel name
+        self.view = "home"
+        self.selected = 0
+        self.fleet = []
+        self.colors = False
+        self.compare_target = None
+        self.compare_fleet = False
         self.panel: list[str] = []
         self.scroll = 0
         self.last_poll = 0.0
@@ -116,7 +61,13 @@ class App:
         return ms[0]["id"] if ms else None
 
     def poll(self) -> None:
-        self.snap = self.reader.snapshot()
+        selected_id = self.fleet[self.selected]["id"] if self.fleet and self.selected < len(self.fleet) else None
+        self.snap = data.fleet_snapshot(self.reader)
+        self.fleet = data.fleet_data(self.root, self.snap)
+        self.selected = next((i for i, row in enumerate(self.fleet) if row["id"] == selected_id),
+                             min(self.selected, max(0, len(self.fleet) - 1)))
+        if self.view == "compare":
+            self.panel = data.compare_lines(data.compare_data(self.root, self.compare_target), self.compare_fleet)
         mid = self.current()
         d = self.mission_dir(mid) if mid else None
         path = os.path.join(d, "events.jsonl") if d else None
@@ -130,6 +81,8 @@ class App:
                 f = fmt_event(ev)
                 if f:
                     self.lines.append((_ts(ev.get("t") or ev.get("ts")) or 0, *f))
+                    if self.scroll and self.view == "transcript":
+                        self.scroll += 1
             self.lines = self.lines[-3000:]
         self.refresh_notes()
 
@@ -223,7 +176,9 @@ class App:
         arg = arg.strip()
         if cmd in ("quit", "q", "exit"):
             return False
-        if cmd == "help":
+        if cmd == "home":
+            self.view, self.scroll = "home", 0
+        elif cmd == "help":
             self.show("help", ["/missions  /mission <id>  /inbox  /answer <question_id> <text>",
                                "/leaderboard  /compare [mission|all]  /gate  /facts [mission]  /n1",
                                "/pause [reason]  /resume [reason]  /stop [reason] (confirm y/n)",
@@ -231,12 +186,13 @@ class App:
                                "@worker-2 <text>; /steer --fleet <text> sends to every RUNNING mission's lead",
                                "/notes: last 20 notes and delivery status; free text steers Lead",
                                data.REMOTE_NOTE_LAG,
-                               "/help  /quit; keys: Up/Down input history, PgUp/PgDn scroll, Esc transcript"])
+                               "/help  /quit; keys: j/k or arrows select; Enter focus; Tab complete; PgUp/PgDn scroll; Esc home; q quit"])
         elif cmd == "notes":
             self.show("notes", data.notes_lines(self.root, mid))
         elif cmd == "compare":
-            fleet = arg in ("all", "fleet") or (not arg and not mid)
+            fleet = arg in ("all", "fleet") or (not arg and (not mid or self.view == "home"))
             target = None if fleet else arg or mid
+            self.compare_target, self.compare_fleet = target, fleet
             self.show("compare", data.compare_lines(data.compare_data(self.root, target), fleet))
         elif cmd == "gate":
             self.show("gate", [data.gate_line(r) for r in data.gate_data(self.root)] or ["no gate requests or results"])
@@ -303,82 +259,102 @@ class App:
         return f"{r['recipe']:<34} {r['gpu_class']:<15} {base:>8} -> {best:>8} {d:>7}  {r['status']}"
 
     # ---------------------------------------------------------------- drawing
+    def color(self, pair):
+        return curses.color_pair(pair) if self.colors else 0
+
     def draw(self, scr) -> None:
         scr.erase()
         h, w = scr.getmaxyx()
 
-        def put(y, x, s, attr=0):
-            if 0 <= y < h and x < w:
+        def put(y, x, value, attr=0):
+            if 0 <= y < h and 0 <= x < w - 1:
                 try:
-                    scr.addnstr(y, x, s, max(0, w - x - 1), attr)
+                    scr.addnstr(y, x, data.safe_text(value), max(0, w - x - 1), attr)
                 except curses.error:
                     pass
 
-        s = self.snap
-        live = [m for m in s.get("missions") or [] if m["status"] in ("running", "active", "ending")]
-        sp = s.get("spend") or {}
-        crusoe = (sp.get("crusoe") or {}).get("total") or 0
-        vast = sp.get("vast") or {}
-        put(0, 0, f" recipe-forge  {time.strftime('%H:%M:%S')}  missions {len(live)} live  "
-                  f"Crusoe ${crusoe:.2f}  Vast ${vast.get('burn_usd_per_hr', 0):.2f}/h (${vast.get('total_usd', 0):.2f})"
-                  + ("  [FIXTURE]" if s.get("fixture") else ""), curses.A_REVERSE | curses.A_BOLD)
-        lb = [r for r in s.get("leaderboard") or [] if r["status"] != "queued"][:5]
-        nq = sum(1 for r in s.get("leaderboard") or [] if r["status"] == "queued")
-        y = 1
-        put(y, 0, f" LEADERBOARD  {'recipe':<32} {'gpu':<15} {'baseline':>8}    {'best':>8} {'delta':>7}  status",
-            curses.A_DIM)
-        y += 1
-        for r in lb:
-            col = curses.color_pair(2) if r["status"] == "verified" else curses.color_pair(1) if r["status"] == "running" else 0
-            put(y, 1, "             " + self.lb_line(r), col)
-            y += 1
-        put(y, 1, f"             {nq} recipe x GPU queued", curses.A_DIM)
-        y += 1
-        mid = self.current()
-        title = f" {self.view.upper()} " if self.view != "transcript" else \
-            f" TRANSCRIPT {mid or '(no missions)'}{'' if self.focus else ' (newest)'} "
-        put(y, 0, title.ljust(w - 1, "-"), curses.A_BOLD)
-        top, bottom = y + 1, h - 3
-        rows = bottom - top
-        if self.view == "transcript":
-            lines = self.lines
-            end = len(lines) - self.scroll
-            for i, (t, role, who, text) in enumerate(lines[max(0, end - rows):end]):
-                yy = top + i
-                stamp = time.strftime("%H:%M:%S", time.localtime(t)) if t else "--:--:--"
-                tag = f"[{who}]"
-                put(yy, 0, stamp, curses.A_DIM)
-                put(yy, 9, tag, curses.color_pair(ROLE_COLOR.get(role, 5)) | curses.A_BOLD)
-                put(yy, 10 + len(tag), text)
+        live = sum(r['state'] == 'running' for r in self.fleet)
+        vast = data.mapping(data.mapping(self.snap.get('spend')).get('vast'))
+        put(0, 0, f" FORGE / {self.view.upper()}   {live} live / {len(self.fleet)} missions   "
+            f"Vast ${data.metric(vast.get('burn_usd_per_hr'))}/h", curses.A_REVERSE | curses.A_BOLD)
+        top, bottom = 2, max(2, h - 4)
+        if self.view == 'home':
+            put(1, 0, data.fleet_header(w), curses.A_DIM)
+            capacity = max(1, bottom - top)
+            start = max(0, self.selected - capacity + 1)
+            for i, row in enumerate(self.fleet[start:start + capacity], start):
+                attr = (curses.A_REVERSE if i == self.selected else 0)
+                if row['alerts']:
+                    attr |= self.color(6) | curses.A_BOLD
+                put(top + i - start, 0, ('>' if i == self.selected else ' ') + ('!' if row['alerts'] else ' ') + data.fleet_line(row, w), attr)
+            if not self.fleet:
+                put(top, 1, 'No missions yet. Waiting for state updates...')
+        elif self.view == 'transcript':
+            put(1, 0, f" MISSION {self.current() or '-'}   {'SCROLLBACK' if self.scroll else 'LIVE'}", curses.A_BOLD)
+            mission = next((r for r in self.snap.get('missions', []) if r['id'] == self.current()), {})
+            agents = data.agent_lines(mission)
+            for line in agents[:max(0, min(len(agents), (bottom - top) // 3))]:
+                put(top, 1, line, self.color(1))
+                top += 1
+            top += 1
+            count = max(0, bottom - top)
+            self.scroll = min(self.scroll, max(0, len(self.lines) - count))
+            end = len(self.lines) - self.scroll
+            for i, (stamp, role, who, message) in enumerate(self.lines[max(0, end - count):end] if count else []):
+                put(top + i, 0, f"{data.clock_text(stamp)} [{who}] {message}", self.color(ROLE_COLOR.get(role, 5)))
         else:
-            for i, line in enumerate(self.panel[self.scroll:self.scroll + rows]):
-                put(top + i, 1, line)
-        put(h - 3, 0, "-" * (w - 1), curses.A_DIM)
-        put(h - 2, 0, f" {self.msg}", curses.A_DIM)
-        prompt = self.prompt()
+            self.scroll = min(self.scroll, max(0, len(self.panel) - max(1, bottom - top)))
+            for i, line in enumerate(self.panel[self.scroll:self.scroll + max(0, bottom - top)]):
+                attr = curses.A_BOLD if ('VERIFIED' in line or '#' in line or 'DELTA' in line) else 0
+                put(top + i, 0, line, attr | (self.color(2) if 'VERIFIED / GATE WIN' in line else 0))
+        if self.buf.startswith('/'):
+            put(h - 4, 0, '  '.join(data.completions(self.buf)) or 'Enter to run command', self.color(1))
+        put(h - 3, 0, 'j/k select | Enter focus | / commands | Tab complete | PgUp/Dn scroll | Esc home | q quit', curses.A_DIM)
+        detail = self.msg
+        if self.view == 'home' and self.fleet and not self.buf:
+            row = self.fleet[self.selected]
+            detail = ' | '.join([data.text(row.get(k)) for k in ('id', 'machine', 'recipe', 'gpu_class')] + row['alerts'])
+        put(h - 2, 0, detail, self.color(6) if self.view == 'home' and self.fleet and self.fleet[self.selected]['alerts'] else curses.A_DIM)
+        prompt = self.prompt() if self.view != 'home' else 'fleet> '
+        prompt = prompt[:max(0, w // 2)]
         available = max(0, w - len(prompt) - 2)
-        visible = self.buf[-available:] if available else ""
+        visible = self.buf[-available:] if available else ''
         put(h - 1, 0, prompt + visible, curses.A_BOLD)
         try:
-            scr.move(h - 1, max(0, min(w - 2, len(prompt) + len(visible))))
+            scr.move(max(0, h - 1), max(0, min(w - 2, len(prompt) + len(visible))))
         except curses.error:
             pass
-        scr.refresh()
+        scr.noutrefresh()
+        curses.doupdate()
 
     def loop(self, scr) -> None:
-        curses.curs_set(1)
-        curses.start_color()
-        curses.use_default_colors()
-        for i, c in enumerate([curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_MAGENTA, curses.COLOR_YELLOW,
-                               curses.COLOR_WHITE, curses.COLOR_RED], start=1):
-            curses.init_pair(i, c, -1)
-        scr.timeout(250)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            if curses.has_colors() and not os.environ.get('NO_COLOR'):
+                curses.start_color()
+                background = curses.COLOR_BLACK
+                try:
+                    curses.use_default_colors()
+                    background = -1
+                except curses.error:
+                    pass
+                for i, c in enumerate([curses.COLOR_CYAN, curses.COLOR_GREEN, curses.COLOR_MAGENTA,
+                                       curses.COLOR_YELLOW, curses.COLOR_WHITE, curses.COLOR_RED], 1):
+                    curses.init_pair(i, c, background)
+                self.colors = True
+        except curses.error:
+            self.colors = False
+        scr.keypad(True)
+        scr.timeout(1000)
         while True:
             if time.time() - self.last_poll > 1.0:
                 try:
                     self.poll()
                 except Exception as e:  # keep the UI alive; show the problem
-                    self.msg = f"read error: {type(e).__name__}: {e}"[:200]
+                    self.msg = f"read error: {type(e).__name__}"[:200]
                 self.last_poll = time.time()
             self.draw(scr)
             try:
@@ -388,27 +364,43 @@ class App:
             if ch in (-1, curses.ERR):
                 continue
             if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
+                if self.view == "home" and not self.buf and self.fleet:
+                    self.run_command("/mission " + self.fleet[self.selected]["id"])
+                    self.poll()
+                    continue
                 line, self.buf = self.buf, ""
                 try:
                     if not self.run_command(line):
                         return
                 except Exception as e:
-                    self.msg = f"error: {type(e).__name__}: {e}"[:200]
+                    self.msg = f"error: {type(e).__name__}"[:200]
             elif ch in (curses.KEY_BACKSPACE, "\x7f", "\b", 127, 8):
                 self.buf = self.buf[:-1]
+            elif ch == "\x15":
+                self.buf = ""
             elif ch == "\x1b":
                 if self.pending_stop:
                     self.pending_stop = None
                     self.msg = "stop cancelled"
-                self.view, self.scroll = "transcript", 0
+                self.view, self.scroll = "home", 0
             elif ch == curses.KEY_PPAGE:
-                self.scroll += 10
+                self.scroll = max(0, self.scroll + (10 if self.view == "transcript" else -10))
             elif ch == curses.KEY_NPAGE:
-                self.scroll = max(0, self.scroll - 10)
-            elif ch == curses.KEY_UP:
-                self.recall(-1)
-            elif ch == curses.KEY_DOWN:
-                self.recall(1)
+                self.scroll = max(0, self.scroll + (-10 if self.view == "transcript" else 10))
+            elif ch == 'q' and not self.buf and not self.pending_stop:
+                return
+            elif ch == '\t':
+                choices = data.completions(self.buf)
+                if choices:
+                    self.buf = os.path.commonprefix(choices)
+                    if len(choices) == 1:
+                        self.buf += ' '
+            elif ch in (curses.KEY_UP, curses.KEY_DOWN) or (self.view == 'home' and not self.buf and ch in ('j', 'k')):
+                direction = -1 if ch in (curses.KEY_UP, 'k') else 1
+                if self.view == 'home' and not self.buf:
+                    self.selected = max(0, min(len(self.fleet) - 1, self.selected + direction))
+                else:
+                    self.recall(direction)
             elif ch == "?" and not self.buf:
                 self.run_command("/help")
             elif isinstance(ch, str) and ch.isprintable():
@@ -419,18 +411,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m forge.tui")
     ap.add_argument("--root", default=os.environ.get("FORGE_ROOT", os.path.expanduser("~/forge")))
     ap.add_argument("--fixture", action="store_true", help="read ~/forge/dash_fixture (fake demo data)")
-    ap.add_argument("--print", action="store_true", help="print one plain-text frame and exit (no curses)")
+    ap.add_argument("--once", "--print", dest="once", action="store_true", help="print one plain-text frame and exit (no curses)")
     args = ap.parse_args()
     root = os.path.join(args.root, "dash_fixture") if args.fixture else args.root
-    if args.print:
+    if args.once:
         app = App(root)
         app.poll()
-        print("LEADERBOARD")
-        for r in [r for r in app.snap.get("leaderboard") or [] if r["status"] != "queued"][:8]:
-            print("  " + app.lb_line(r))
-        print(f"TRANSCRIPT {app.current()}")
-        for t, role, who, text in app.lines[-25:]:
-            print(f"{time.strftime('%H:%M:%S', time.localtime(t))} [{who}] {text}")
+        print("\n".join(data.home_lines(app.fleet, app.snap)))
         return
     os.environ.setdefault("ESCDELAY", "25")
     if curses is None:

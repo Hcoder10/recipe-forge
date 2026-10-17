@@ -20,28 +20,6 @@ serve:
         --max-num-seqs 64 \
         --mamba_ssm_cache_dtype float32
   notes: "Card: pip install -U \"vllm>=0.10.1\"; \"If you encounter a CUDA OOM issue, try --max-num-seqs 64 and consider lower the value further if the error persists.\" Docker alternative on the card uses vllm/vllm-openai:v0.10.1 with --max-model-len 131072. Tool calling variant on the card adds --enable-auto-tool-choice --tool-parser-plugin nemotron_toolcall_parser_no_streaming.py --tool-call-parser \"nemotron_json\". Reasoning control: /think or /no_think in system prompt (default reasoning on)."
-published:
-  - metric: "relative_speedup"
-    value: 6.3
-    units: "x output tokens/s/GPU vs Qwen3-8B"
-    gpu: "single A10G"
-    concurrency: null
-    isl_osl: "8k/16k"
-    engine: null
-    precision: "bfloat16"
-    source: "https://research.nvidia.com/labs/adlr/files/NVIDIA-Nemotron-Nano-2-Technical-Report.pdf"
-    quote: "Figure 1| Comparison of Nemotron Nano 2 and Qwen3-8B in terms of accuracy and throughput. Nemotron Nano 2 achieves comparable or better accuracies on complex reasoning benchmarks, while achieving up to 6.3× higher throughput for such workloads. We abbreviate input sequence length to ISL and output sequence length to OSL and measure throughput on a single A10G GPU in bfloat16."
-    note: "Figure 1 bars: 'ISL/OSL 1k/8k' and 'ISL/OSL 8k/16k' with relative throughput labels 3.3 and 6.3; abstract: 'up to 6× higher inference throughput in reasoning settings like 8k input and 16k output tokens'. Engine not stated for Figure 1 (Section 4 measurements use vLLM at max batch size that fits on A10G)."
-  - metric: "relative_speedup"
-    value: 3.3
-    units: "x output tokens/s/GPU vs Qwen3-8B"
-    gpu: "single A10G"
-    concurrency: null
-    isl_osl: "1k/8k"
-    engine: null
-    precision: "bfloat16"
-    source: "https://research.nvidia.com/labs/adlr/files/NVIDIA-Nemotron-Nano-2-Technical-Report.pdf"
-    quote: "Figure 1, ISL/OSL 1k/8k bar pair labelled 3.3 / 1.0 (Relative Throughput (Output tokens/s/GPU)); text: 'at 3×–6× higher throughput than Qwen3-8B ... for generation-heavy scenarios like 1k input / 8k output or 8k input / 16k output tokens (Figure 1)'"
 chat:
   system_prompt: "/no_think"
   chat_template_kwargs: {}
@@ -53,3 +31,15 @@ variants:
   - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
   - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
   - {name: c16, concurrency: 16, max_tokens: 512, metric: output_tok_s}
+published:
+  value: 73
+  metric: decode_tok_s
+  unit: tokens/s
+  hardware: 1x RTX 5090 32GB; NIM 1.12.2 BF16
+  concurrency: 1
+  isl: null
+  osl: null
+  source_url: https://forums.developer.nvidia.com/t/nemotron-3-nano-on-one-rtx-5090-with-nim-300-tok-s-flat-to-120k-context-128-concurrent-requests/384859
+  date: '2026-10-02'
+published_note: First-hand community measurement, not NVIDIA official. Same BF16 model
+  family; exact single-stream lengths unspecified and runtime differs. Context only.

@@ -29,18 +29,6 @@ serve:
       --reasoning-parser nano_v3 \
       --kv-cache-dtype fp8
   notes: "Card: \"We need vllm>=0.15.1 for this model.\" Jetson Thor / DGX Spark: NGC vllm container 26.02-py3. Parser is downloaded from the BF16 repo on both cards. Image tag not named by the card (v0.15.1 is the nearest official tag meeting the minimum). Reasoning off via enable_thinking=False."
-published:
-  - metric: "relative_speedup"
-    value: 1.8
-    units: "x latency and throughput vs BF16"
-    gpu: "DGX Spark & Jetson Thor"
-    concurrency: null
-    isl_osl: null
-    engine: null
-    precision: "FP8"
-    source: "https://huggingface.co/blog/nvidia/nemotron-3-nano-4b"
-    quote: "delivers up to 1.8X improvement in latency and throughput compared to the original BF16 version on DGX Spark & Jetson Thor"
-    note: "HF blog authored by NVIDIA staff; engine, ISL/OSL and concurrency not stated."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}
@@ -51,3 +39,7 @@ hardware:
 variants:
   - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
   - {name: c8, concurrency: 8, max_tokens: 512, metric: output_tok_s}
+published: null
+published_note: No checkpoint-specific absolute serving number verified in the reviewed
+  primary sources; see the human-only target report. Relative ratios and acceptance
+  lengths are not serving records.

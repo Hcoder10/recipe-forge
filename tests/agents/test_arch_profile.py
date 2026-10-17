@@ -12,6 +12,31 @@ from forge.tools.bench import RemoteBenchRunner
 
 
 class TraceTests(unittest.TestCase):
+    def test_discovery_clock_conversion_and_owned_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = root / "existing.json"
+            old.write_text("do not remove")
+            (root / "frontend.json").write_text(json.dumps({"traceEvents": []}))
+            trace = {"baseTimeNanoseconds": 1000000, "traceEvents": [
+                {"ph": "X", "cat": "kernel", "name": "prefill", "ts": 0, "dur": 10},
+                {"ph": "X", "cat": "kernel", "name": "gemm", "ts": 20, "dur": 10}]}
+            with gzip.open(root / "worker.pt.trace.json.gz", "wt") as f:
+                json.dump(trace, f)
+            out = benchjob.parse_profile_traces(root, {old}, 1, [(1020, 1040)])
+            self.assertEqual([k["name"] for k in out["top_kernels"]], ["gemm"])
+            self.assertTrue(out["trace_removed"])
+            self.assertIsNone(out["trace_path"])
+            self.assertEqual(list(root.iterdir()), [old])
+
+    def test_bad_trace_is_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "bad.json").write_text("invalid")
+            with self.assertRaises(ValueError):
+                benchjob.parse_profile_traces(root, set(), 1, [(0, 1)])
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_categories_and_overlap(self):
         names = ["flash_fwd", "selective_scan", "fused_moe", "cublas_gemm",
                  "rmsnorm", "nvfp4_quant", "softmax", "ncclAllReduce", "memcpy", "unknown"]
@@ -39,6 +64,8 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(result["top_kernels"][0]["time_us"], 140)
         with self.assertRaises(ValueError):
             benchjob.parse_trace(trace, 2, [(200, 300)])
+        with self.assertRaises(ValueError):
+            benchjob.parse_trace(trace, 2, [])
 
     def test_specialized_kernels_before_generic_gemm(self):
         for name, expected in [("grouped_gemm_fp8", "moe"), ("cutlass_moe", "moe"),
@@ -50,6 +77,13 @@ class TraceTests(unittest.TestCase):
 
 
 class StructureTests(unittest.TestCase):
+    def test_dotted_speculative_config(self):
+        result = benchjob.extract_structure({}, {"serve_args": [
+            "--speculative_config.model", "draft", "--speculative_config.method", "dflash",
+            "--speculative_config.num_speculative_tokens", "7"]})
+        self.assertEqual(result["drafter_config"], {
+            "model": "draft", "method": "dflash", "num_speculative_tokens": 7})
+
     def test_missing_profiler_preserves_structure(self):
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / "config.json").write_text('{"architectures":["Hybrid"]}')
@@ -95,6 +129,25 @@ class StructureTests(unittest.TestCase):
             self.assertTrue(available)
             self.assertEqual(files, [str(models / "hybrid.py")])
             self.assertEqual(structure["architectures"], ["HybridForCausalLM"])
+
+    def test_modern_profiler_options_are_supported_fields_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "config.json").write_text('{}')
+            package = root / "vllm"
+            (package / "config").mkdir(parents=True)
+            (package / "config/profiler.py").write_text(
+                'class ProfilerConfig:\n    torch_profiler_dir: str = ""\n'
+                '    ignore_frontend: bool = False\n    torch_profiler_with_stack: bool = True\n'
+                '# start_profile stop_profile\n')
+            spec = {"python": "python", "recipe": {"model": str(root)}}
+            with patch.object(benchjob.subprocess, "run", return_value=SimpleNamespace(
+                    stdout=json.dumps(str(package)))):
+                _, _, available = benchjob.inspect_profile_target(spec)
+            self.assertTrue(available)
+            self.assertTrue(spec["profiler_config"])
+            self.assertEqual(spec["profiler_options"], {
+                "ignore_frontend": True, "torch_profiler_with_stack": False})
 
     def test_fallback_and_cache(self):
         with tempfile.TemporaryDirectory() as td:
@@ -151,6 +204,29 @@ class CodeReuseTests(unittest.TestCase):
 
 
 class ToolTests(unittest.TestCase):
+    def test_profile_uses_served_name_and_cleans_failed_request(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            trace = root / "trace"
+            trace.mkdir()
+            old = trace / "old.json"
+            old.write_text("preserve")
+            def request(*args, **kwargs):
+                if kwargs.get("token_clock"):
+                    (trace / "new.json").write_text("partial capture")
+                    raise ValueError("request failed")
+                return {}
+            with patch.object(benchjob, "stream_one", side_effect=request) as stream, patch.object(
+                    benchjob.urllib.request, "urlopen", return_value=response):
+                with self.assertRaises(ValueError):
+                    benchjob.profile_workload(1234, {"model": "repo", "serve_args": [
+                        "--served-model-name", "alias"]}, {"workload": {}}, root)
+            self.assertEqual(stream.call_args.args[1], "alias")
+            self.assertEqual(list(trace.iterdir()), [old])
+
     def test_profile_stops_after_request_failure(self):
         response = Mock()
         response.__enter__ = Mock(return_value=response)

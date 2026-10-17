@@ -284,5 +284,163 @@ class CommandDataTests(unittest.TestCase):
         self.assertFalse((self.mission / "operator_notes.jsonl").exists())
 
 
+class FleetTests(unittest.TestCase):
+    def test_empty_and_completion(self):
+        with tempfile.TemporaryDirectory() as root:
+            app = App(root)
+            app.poll()
+            self.assertEqual(app.view, 'home')
+            self.assertEqual(app.fleet, [])
+            self.assertIn('No missions', ' '.join(data.home_lines([], {})))
+        self.assertEqual(data.completions('/comp'), ['/compare'])
+        self.assertFalse(data.completions('hello'))
+
+    def test_fleet_alerts_elapsed_gate_and_agent_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'missions' / 'demo'
+            path.mkdir(parents=True)
+            events = [{'t': 950, 'kind': 'env_blocked'}, {'t': 960, 'kind': 'env_blocked'},
+                      {'t': 970, 'kind': 'tool_call', 'ok': False},
+                      {'t': 980, 'kind': 'tool_error'}]
+            (path / 'events.jsonl').write_text(''.join(json.dumps(e) + '\n' for e in events) + '{"partial":')
+            (path / 'gate_requests.jsonl').write_text('{"id":"g"}\n')
+            snapshot = {'missions': [{'id': 'demo', 'status': 'running', 'started_at': 1,
+                                      'deadline': 1801, 'usd': 0, 'team': []}]}
+            row = data.fleet_data(root, snapshot, now=1000)[0]
+            self.assertEqual(row['elapsed'], 999)
+            self.assertEqual(row['box'], 1800)
+            self.assertEqual(row['gate'], 'queued')
+            self.assertEqual(len(row['alerts']), 3)
+            self.assertIn('no bench', data.fleet_line(row))
+            self.assertIn('Lead', data.agent_lines(snapshot['missions'][0])[0])
+            with (path / 'events.jsonl').open('w') as stream:
+                stream.write('{"kind":"mission_end","t":500}\n')
+            row = data.fleet_data(root, snapshot, now=1000)[0]
+            self.assertEqual(row['state'], 'ended')
+            self.assertEqual(row['elapsed'], 499)
+            self.assertFalse(row['alerts'])
+
+    def test_malformed_gate_delta_and_timestamps(self):
+        self.assertIsNotNone(fmt_event({'kind': 'gate_result', 'delta_pct': 'broken'}))
+        self.assertEqual(data.clock_text(1e100), '--:--:--')
+
+    def test_layout_and_redaction(self):
+        self.assertEqual(data.safe_text('a    b'), 'a    b')
+        sensitive = 'synthetic_private_value'
+        for key in ('api_key', 'token', 'password', 'secret'):
+            self.assertNotIn(sensitive, data.text({key: sensitive}))
+        self.assertNotIn(sensitive, fmt_event({'kind': 'tool_call', 'tool': 'read',
+                                             'args': {'token': sensitive}})[2])
+        self.assertLessEqual(len(data.fleet_header(80)), 79)
+
+    def test_fleet_is_not_limited_to_twenty_four(self):
+        with tempfile.TemporaryDirectory() as root:
+            for i in range(30):
+                path = Path(root) / 'missions' / str(i)
+                path.mkdir(parents=True)
+                (path / 'spec.json').write_text('{}')
+            app = App(root)
+            app.poll()
+            self.assertEqual(len(app.fleet), 30)
+
+    def test_operator_views_do_not_write_notes(self):
+        with tempfile.TemporaryDirectory() as root:
+            mission = Path(root) / 'missions' / 'demo'
+            mission.mkdir(parents=True)
+            app = App(root)
+            app.poll()
+            for command in ('/home', '/compare all', '/gate', '/mission demo', '/notes'):
+                app.run_command(command)
+            self.assertFalse((mission / 'operator_notes.jsonl').exists())
+            self.assertFalse((mission / 'control.jsonl').exists())
+
+
+@unittest.skipUnless(__import__('sys').platform == 'linux', 'real curses PTY requires Linux')
+class PtyTests(unittest.TestCase):
+    def exercise(self, root, monochrome=False):
+        import fcntl
+        import os
+        import pty
+        import select
+        import signal
+        import struct
+        import subprocess
+        import sys
+        import termios
+        import time
+        master, slave = pty.openpty()
+        proc = None
+        output = bytearray()
+        def size(height, width):
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', height, width, 0, 0))
+            if proc is not None:
+                proc.send_signal(signal.SIGWINCH)
+        def drain(seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], .05)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+        try:
+            size(40, 120)
+            env = dict(os.environ, TERM='xterm-256color')
+            if monochrome:
+                env['NO_COLOR'] = '1'
+                env['TERM'] = 'vt100'
+            proc = subprocess.Popen([sys.executable, '-m', 'forge.tui', '--root', str(root)],
+                                    stdin=slave, stdout=slave, stderr=slave, env=env)
+            drain(1.5)
+            self.assertIsNone(proc.poll(), 'TUI exited before keyboard input')
+            self.assertIn(b'FORGE', output, 'initial frame missing')
+            os.write(master, b'j\r')
+            drain(.4)
+            size(24, 80)
+            os.write(master, b'/comp\tall\r')
+            drain(.5)
+            if not monochrome:
+                os.write(master, b'\x1b[6~')
+            size(3, 10)
+            drain(.2)
+            size(40, 120)
+            drain(.3)
+            os.write(master, b'\x1b')
+            drain(.2)
+            os.write(master, b'\x15q')
+            drain(.3)
+            self.assertEqual(proc.wait(timeout=5), 0, 'TUI did not exit cleanly')
+            self.assertNotIn(b'Traceback', output, 'TUI produced a traceback')
+            self.assertNotIn(b'read error:', output, 'TUI could not read state')
+        finally:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+            os.close(slave)
+
+    def test_real_pty_empty_partial_resize_and_monochrome(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.exercise(root, monochrome=True)
+            mission = Path(root) / 'state' / 'missions' / 'demo'
+            mission.mkdir(parents=True)
+            (mission / 'spec.json').write_text('{"recipe_id":"demo","gpu_class":"demo"}')
+            (mission / 'events.jsonl').write_text('{"kind":"mission_start","t":1}\n{"partial":')
+            (mission / 'benches.jsonl').write_text('{"partial":')
+            self.exercise(root)
+
+    @unittest.skipUnless(__import__('os').environ.get('FORGE_TUI_LIVE_TEST'), 'opt-in live state smoke test')
+    def test_live_pty_and_once(self):
+        import os
+        import subprocess
+        import sys
+        root = os.environ['FORGE_TUI_LIVE_TEST']
+        result = subprocess.run([sys.executable, '-m', 'forge.tui', '--root', root, '--once'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 0, 'live snapshot failed')
+        self.assertIn(b'FORGE FLEET', result.stdout)
+        self.exercise(root)
+
+
 if __name__ == "__main__":
     unittest.main()

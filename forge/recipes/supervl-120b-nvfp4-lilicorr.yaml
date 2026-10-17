@@ -39,41 +39,6 @@ serve:
       --tool-call-parser qwen3_coder \
       --reasoning-parser nemotron_v3
   notes: "Card: \"This vLLM configuration is intended for DGX Spark (GB10) only. It serves the model with one concurrent sequence and seven speculative tokens per draft using LiLiCorr.\" Image: vllm/vllm-openai:nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2 or vllm/vllm-openai:v0.32.0. $MODEL/$DRAFT_MODEL substituted from the card's export lines. Published text has a TAB after the backslash on the num_speculative_tokens line (shown as <TAB> in quoted), which ends the command there if pasted into bash as-is; args here are the full intended list. Reasoning levels off / on (medium) / on via enable_thinking and medium_effort."
-published:
-  - metric: "spec_acceptance_length"
-    value: 4.74
-    units: "tokens (mean accepted length)"
-    gpu: null
-    concurrency: 64
-    isl_osl: null
-    engine: null
-    precision: "NVFP4 target"
-    spec_decode: "LiLiCorr, draft length 7, temperature 0"
-    source: "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr"
-    quote: "SPEED-Bench table row '| **Overall Average** | **4.74** | **4.36** |' (columns: Acceptance Length - T=0 | T=1). Benchmarked on SPEED-Bench Qualitative split (880 prompts) with a draft length of 7, concurrency 64, and a mean over 3 seeds."
-  - metric: "spec_acceptance_length"
-    value: 4.36
-    units: "tokens (mean accepted length)"
-    gpu: null
-    concurrency: 64
-    isl_osl: null
-    engine: null
-    precision: "NVFP4 target"
-    spec_decode: "LiLiCorr, draft length 7, temperature 1.0 top_p 0.95"
-    source: "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr"
-    quote: "SPEED-Bench table row '| **Overall Average** | **4.74** | **4.36** |' (columns: Acceptance Length - T=0 | T=1). Benchmarked on SPEED-Bench Qualitative split (880 prompts) with a draft length of 7, concurrency 64, and a mean over 3 seeds."
-  - metric: "relative_speedup"
-    value: 2.3
-    units: "x token generation vs no speculation"
-    gpu: "DGX Spark"
-    concurrency: null
-    isl_osl: null
-    engine: null
-    precision: "not stated in source"
-    spec_decode: "LiLiCorr"
-    source: "https://developer.nvidia.com/blog/nvidia-nemotron-3-5-super-vl-powers-specialized-agents-with-multimodal-reasoning/"
-    quote: "It delivers up to 2.3x faster token generation than decoding without speculation."
-    note: "Stated for LiLiCorr on DGX Spark; the LiLiCorr drafter card says it pairs with the NVFP4 target."
 chat:
   system_prompt: null
   chat_template_kwargs: {enable_thinking: false}
@@ -87,3 +52,7 @@ hardware:
   notes: "Card lists DGX Spark as the target for this command. For RTX Pro 6000 the card points to llama.cpp / Unsloth (no vLLM command given). --gpu-memory-utilization 0.75 from the card; weights alone are ~76 GB (target 75.01 + drafter 1.32), and 0.75 x 95 GB = ~71 GB, so the published args cannot hold the weights on one 95 GB RTX PRO 6000; weights + 20% (~91.6 GB) would otherwise be under 95 GB."
 variants:
   - {name: c1, concurrency: 1, max_tokens: 512, metric: decode_tok_s}
+published: null
+published_note: No checkpoint-specific absolute serving number verified in the reviewed
+  primary sources; see the human-only target report. Relative ratios and acceptance
+  lengths are not serving records.
