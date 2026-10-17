@@ -202,7 +202,7 @@ function renderGates(s) {
     const vs = (g.verdicts || []).slice(0, 5).map((v) => {
       const res = v.win && v.lossless !== false ? '<span class="badge win">WIN</span>' : v.lossless === false ? '<span class="badge lossy">LOSSY</span>' : '<span class="badge lose">no win</span>';
       const tip = `${v.verdict_id} · ${v.kind || ""} · ${v.pairs ?? "?"} pairs · mean log-gain ${fmt(v.mean_log_gain, 4)} (bar ${fmt(v.threshold, 4)})${v.lossless_detail?.top1 != null ? ` · top-1 ${v.lossless_detail.top1}` : ""}${v.reason ? " · " + v.reason : ""}`;
-      return `<div class="vrow"${tipAttr(tip)}><span class="vid">${esc(v.verdict_id)}</span><span class="rec">${esc(v.recipe || v.mission || "")}</span>${pairDots(v.pair_gains) || `<span class="muted">${esc(v.pairs ?? "")} pairs</span>`}<span class="g">${v.delta_pct != null ? (v.delta_pct >= 0 ? "+" : "") + fmt(v.delta_pct, 1) + "%" : ""}</span>${res}</div>`;
+      return `<div class="vrow"${tipAttr(tip)}><span class="vid">${esc(v.verdict_id)}</span><span class="rec">${esc(v.recipe || v.mission || "")}</span>${pairDots(v.pair_gains) || (v.pairs != null ? `<span class="muted">${esc(v.pairs)} pairs</span>` : "<span></span>")}<span class="g">${v.delta_pct != null ? (v.delta_pct >= 0 ? "+" : "") + fmt(v.delta_pct, 1) + "%" : ""}</span>${res}</div>`;
     }).join("");
     return `<div class="gate">
       <div class="gh"><span class="m">${esc(g.machine)}</span>${g.quiet === false ? '<span class="sev warning">' + ICON.warn + "not quiet</span>" : ""}
@@ -312,7 +312,7 @@ function renderBrain(s) {
   const facts = (b.latest || []).map((f) => `<div class="fact"${tipAttr(f.claim + (f.evidence ? " · evidence " + f.evidence : ""))}>
     <span class="st" style="color:${["proposed", "open"].includes(f.status) ? "var(--ink-2)" : factColor(f.status)}">${esc(f.status.replace("_", " "))}</span>
     <span class="cl">${esc(f.claim)}</span>
-    <span class="meta">${esc(f.recipe || "")}${f.lane ? " · " + esc(f.lane) : ""} · ${ago(f.ts)}</span></div>`).join("");
+    <span class="meta">${esc([f.recipe, f.lane, ago(f.ts)].filter(Boolean).join(" · "))}</span></div>`).join("");
   $("brain").innerHTML = `<svg class="stack" viewBox="0 0 ${W} 14" preserveAspectRatio="none">${segs}</svg>
     <div class="legend">${legend}</div><div class="facts">${facts}</div>`;
 }
