@@ -68,3 +68,23 @@ the rig's `~/forge/results/boxes/<machine>/` as it appears. Mission rows: `resul
 Fleet state for the dash: `<FORGE_STATE>/fleet/machines.json` (snapshot), `fleet/queue.json`,
 `fleet/spend.jsonl`, `fleet/alerts.jsonl`; leaderboard in `results/leaderboard.json` + `.md`, rows in
 `results/rows/*.json`.
+
+## Gate on a remote target (`forge.fleet.remotegate`)
+
+`gate_for(machine)` returns core's `CoreGate` when the target is this machine and `RemoteGate(machine)` otherwise.
+RemoteGate calls `forge.gate.request/status/ledger` ON the target through the executor (one gate and ledger per
+machine). Same signatures and normalized rows as CoreGate; `bundle_dir` is a path on the target.
+
+## Recipe check (`forge.fleet.recipecheck`)
+
+`python -m forge.fleet.recipecheck --recipe <id> --gpu-class <c>` (run via the executor with `kind="serve"`):
+starts NVIDIA's published server for the recipe in its recipe-files dir, waits for health, sends one chat request,
+stops, prints `RECIPE_CHECK {ok, startup_s, completion_tokens, ...}`. Verified Oct 17: Bolt+LiLiCorr on a Vast
+RTX PRO 6000 (startup 201 s), Super-VL+LiLiCorr with the 95 GB adapt (startup 498 s).
+
+## Boxes
+
+Vast instances are docker containers (PID 1 is not systemd; Landlock ABI 8 is available). Each box runs, started
+by `forge.fleet.boxsetup` with nohup: the `forge.sched` daemon (LANDLORD_URL=http://127.0.0.1:7788/mcp through
+landlord's reverse tunnel, building `vast-<instance>`) and the `forge.gate.service`. Recipe files (reasoning-parser
+plugins) are in `$FORGE_ROOT/state/recipe_files/<base_id>/`. Setup progress: `$FORGE_ROOT/state/box_status.json`.
