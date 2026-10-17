@@ -15,7 +15,13 @@ from pathlib import Path
 
 
 def cmd_run(a) -> int:
+    import signal
     from forge.agents.mission import run_mission
+
+    def _stop(signum, frame):   # background jobs ignore SIGINT; TERM ends the mission cleanly (row written)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
     spec = json.loads(Path(a.spec).read_text())
     if a.profile:
         spec["profile"] = a.profile

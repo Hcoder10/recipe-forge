@@ -58,7 +58,11 @@ class CoreGate:
 
     def ledger(self, mission_id: str | None = None, recipe_id: str | None = None) -> list[dict]:
         g = self._mod()
-        rows = [normalize_row(r) for r in g.ledger(machine=self.machine.get("name"))]
+        try:
+            raw = g.ledger(mission_id=mission_id, recipe_id=recipe_id)
+        except TypeError:
+            raw = g.ledger()
+        rows = [normalize_row(r) for r in raw]
         return [r for r in rows if (mission_id is None or r["mission_id"] == mission_id)
                 and (recipe_id is None or r["recipe_id"] == recipe_id)]
 

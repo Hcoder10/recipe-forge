@@ -556,8 +556,9 @@ class MissionRunner:
                 self.finished.wait(float(self.spec.get("tick_s", 2)))
         except KeyboardInterrupt:
             self.end("interrupted")
-        for t in threads:
-            t.join(timeout=float(self.spec.get("join_timeout_s", 120)))
+        deadline = time.time() + float(self.spec.get("join_timeout_s", 60))
+        for t in threads:   # agents mid-call are daemon threads; do not wait on a long bench
+            t.join(timeout=max(0.1, deadline - time.time()))
         grace = float(self.spec.get("gate_grace_min", 0)) * 60
         if grace:
             self.wait_gates = True

@@ -25,7 +25,8 @@ class RemoteBenchRunner:
     def run(self, mission, *, config_delta=None, env=None, bundle_dir=None, n_prompts=None,
             fresh_reference=False, label="bench") -> dict:
         ws = self.ex.workspace(mission.id)
-        stamp = f"{label}-{int(time.time() * 1000)}"
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (label or "bench"))[:24]
+        stamp = f"{safe}-{int(time.time() * 1000)}"
         work = str(PurePosixPath(ws) / "bench" / stamp)
         rec = mission.recipe
         spec = {
@@ -53,6 +54,9 @@ class RemoteBenchRunner:
             err = (r.stderr or r.stdout).strip().splitlines()
             raise EnvBlocked(f"bench job failed (rc={r.rc}): {(err[-1] if err else 'no output')[:300]}")
         out = json.loads(line[len("BENCH_RESULT "):])
+        if not out.get("ok") and out.get("infra"):
+            raise EnvBlocked(f"the reference server failed to start (reported to operators): "
+                             f"{out.get('error', '?')[:200]}")
         if not out.get("ok"):
             # server failing to start with the candidate's settings is the agent's to fix
             raise ToolError(f"bench failed: {out.get('error', '?')}")

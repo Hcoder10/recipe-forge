@@ -38,13 +38,13 @@ def _resolve(ctx, path: str, for_write: bool = False) -> tuple[str, str, str | N
         raise ToolError("path may not contain '..'")
     sp = m.site_packages.rstrip("/")
     if p.startswith("/"):
-        if p.startswith(sp + "/"):
+        if p == sp or p.startswith(sp + "/"):
             rel = p[len(sp) + 1:]
             return "overlay", p, rel
-        if p.startswith(m.ws.rstrip("/") + "/"):
+        if p == m.ws.rstrip("/") or p.startswith(m.ws.rstrip("/") + "/"):
             return "ws", p, None
         for ro in m.readable_roots:
-            if p.startswith(ro.rstrip("/") + "/"):
+            if p == ro.rstrip("/") or p.startswith(ro.rstrip("/") + "/"):
                 if for_write:
                     raise ToolError(f"{path} is read-only")
                 return "ro", p, None
@@ -134,6 +134,10 @@ def _brief_measure(r):
 
 
 def t_read(ctx, path, start=1, lines=150):
+    kind, ap, rel = _resolve(ctx, path)
+    target = _overlay_path(ctx, rel) if kind == "overlay" and ctx.executor.exists(_overlay_path(ctx, rel)) else ap
+    if _file_run(ctx, ["test", "-d", target], "read", allowed=(0, 1)).rc == 0:
+        return t_ls(ctx, path)
     text, src = _read_current(ctx, path)
     all_lines = text.splitlines()
     start = max(1, int(start))
@@ -144,10 +148,14 @@ def t_read(ctx, path, start=1, lines=150):
             "to": start + len(chunk) - 1, "text": body}
 
 
-def t_search(ctx, pattern, path="vllm", max_hits=60):
+def t_search(ctx, pattern, path="vllm", max_hits=60, context=0, include=None, ignore_case=False):
     kind, ap, _ = _resolve(ctx, path)
-    r = ctx.executor.run(["grep", "-rnE", "--include=*.py", "--include=*.cu", "--include=*.h", "--include=*.json",
-                          "-m", "20", pattern, ap], timeout_s=60, mission_id=ctx.mission.id, label="search")
+    includes = [include] if include is not None else ["*." + ext for ext in
+               ("py", "cu", "h", "json", "cuh", "cpp", "yaml", "toml", "txt", "md")]
+    cmd = ["grep", "-rnE", *["--include=" + glob for glob in includes], "-C", str(max(0, int(context)))]
+    if ignore_case:
+        cmd.append("-i")
+    r = ctx.executor.run(cmd + ["--", pattern, ap], timeout_s=60, mission_id=ctx.mission.id, label="search")
     if r.infra_error:
         raise EnvBlocked(r.infra_error)
     if r.rc not in (0, 1):
@@ -155,28 +163,228 @@ def t_search(ctx, pattern, path="vllm", max_hits=60):
     hits = r.stdout.splitlines()
     sp = ctx.mission.site_packages.rstrip("/") + "/"
     hits = [h.replace(sp, "") for h in hits]
+    max_hits = max(1, int(max_hits))
     return {"hits": hits[:max_hits], "total": len(hits), "truncated": len(hits) > max_hits}
 
 
-def t_edit(ctx, path, old=None, new=None, content=None):
+def t_edit(ctx, path, old=None, new=None, content=None, replace_all=False):
     kind, ap, rel = _resolve(ctx, path, for_write=True)
     ex = ctx.executor
     target = _overlay_path(ctx, rel) if kind == "overlay" else ap
+    before = _read_current(ctx, path)[0] if ex.exists(target) or ex.exists(ap) else ""
     if content is not None:
         if old is not None:
             raise ToolError("give either content (whole file) or old+new (one replacement), not both")
         ex.write_text(target, content)
-        return {"path": path, "wrote": len(content), "as": "overlay" if kind == "overlay" else "workspace file"}
+        return {"path": path, "wrote": len(content), "as": "overlay" if kind == "overlay" else "workspace file",
+                "diff": _file_diff(path, before, content)[:2000]}
     if old is None or new is None:
         raise ToolError("edit needs old and new (exact text replacement) or content (whole file)")
     text, _ = _read_current(ctx, path)
+    if not old:
+        raise ToolError("old text must not be empty")
     n = text.count(old)
+    span = None
     if n == 0:
-        raise ToolError("old text not found (it must match exactly, including indentation)")
-    if n > 1:
+        span = _whitespace_match(text, old)
+        n = 1
+    if n > 1 and not replace_all:
         raise ToolError(f"old text occurs {n} times; include more surrounding lines so it is unique")
-    ex.write_text(target, text.replace(old, new, 1))
-    return {"path": path, "replaced": 1, "as": "overlay" if kind == "overlay" else "workspace file"}
+    after = text[:span[0]] + new + text[span[1]:] if span else text.replace(old, new, n if replace_all else 1)
+    ex.write_text(target, after)
+    return {"path": path, "replaced": n if replace_all else 1,
+            "as": "overlay" if kind == "overlay" else "workspace file", "diff": _file_diff(path, text, after)[:2000]}
+
+
+def _file_diff(path, before, after):
+    return "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                        f"a/{path}", f"b/{path}", n=2))
+
+
+def _whitespace_match(text, old):
+    lines = text.splitlines(keepends=True)
+    wanted = old.splitlines(keepends=True)
+    for normalize in (str.rstrip, str.strip):
+        matches = []
+        for i in range(len(lines) - len(wanted) + 1):
+            chunk = lines[i:i + len(wanted)]
+            if list(map(normalize, chunk)) == list(map(normalize, wanted)):
+                actual = "".join(chunk)
+                if not old.endswith(("\n", "\r")):
+                    actual = actual.rstrip("\r\n")
+                start = sum(len(line) for line in lines[:i])
+                matches.append((start, start + len(actual)))
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ToolError("old text has multiple whitespace-tolerant matches; include more context")
+    raise ToolError("old text not found, including whitespace-tolerant matching")
+
+
+def _file_run(ctx, cmd, label, allowed=(0,)):
+    r = ctx.executor.run(cmd, timeout_s=60, mission_id=ctx.mission.id, label=label)
+    if r.infra_error:
+        raise EnvBlocked(r.infra_error)
+    if r.rc not in allowed:
+        detail = " ".join((r.stderr or "path missing or invalid").splitlines())[:200]
+        raise ToolError(f"{label} failed: {detail}")
+    return r
+
+
+def _listing_roots(ctx, path):
+    kind, ap, rel = _resolve(ctx, path)
+    roots = [(ap, False)]
+    if kind == "overlay":
+        op = _overlay_path(ctx, rel)
+        if ctx.executor.exists(op):
+            roots.append((op, True))
+    return roots
+
+
+def t_ls(ctx, path=".", depth=1):
+    entries = {}
+    roots = _listing_roots(ctx, path)
+    for root, edited in roots:
+        if not ctx.executor.exists(root) and len(roots) > 1:
+            continue
+        _file_run(ctx, ["test", "-d", root], "ls")
+        r = _file_run(ctx, ["find", root, "-mindepth", "1", "-maxdepth", str(max(1, int(depth))),
+                            "-printf", "%P\\0%y\\0%s\\0"], "ls")
+        fields = r.stdout.split("\0")
+        for i in range(0, len(fields) - 1, 3):
+            name, typ, size = fields[i:i + 3]
+            entries[name] = {"path": name, "type": "directory" if typ == "d" else "file",
+                             "size": int(size), "edited": edited}
+    rows = [entries[name] for name in sorted(entries)]
+    return {"path": path, "entries": rows[:300], "truncated": len(rows) > 300}
+
+
+def t_glob(ctx, pattern, path="vllm"):
+    # find's -path treats ** like *, so also include each zero-directory variant.
+    patterns = {pattern}
+    pending = [pattern]
+    while pending:
+        current = pending.pop()
+        start = 0
+        while (at := current.find("**/", start)) >= 0:
+            variant = current[:at] + current[at + 3:]
+            if variant not in patterns:
+                patterns.add(variant)
+                pending.append(variant)
+            start = at + 3
+    files = set()
+    roots = _listing_roots(ctx, path)
+    for root, _ in roots:
+        if not ctx.executor.exists(root) and len(roots) > 1:
+            continue
+        predicates = []
+        for p in sorted(patterns):
+            if predicates:
+                predicates.append("-o")
+            predicates += ["-path", root.rstrip("/") + "/" + p]
+        r = _file_run(ctx, ["find", root, "-type", "f", "(", *predicates, ")", "-printf", "%P\\0"], "glob")
+        files.update(posixpath.join(path, name) for name in r.stdout.split("\0") if name)
+    return {"files": sorted(files)[:200], "truncated": len(files) > 200}
+
+
+def t_apply_patch(ctx, patch):
+    lines = patch.splitlines()
+    if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
+        raise ToolError("patch must have Begin Patch and End Patch markers")
+    # Stage by resolved destination, so aliases and repeated sections see earlier staged changes.
+    staged, originals, names = {}, {}, {}
+
+    def target(path):
+        kind, ap, rel = _resolve(ctx, path, for_write=True)
+        dest = _overlay_path(ctx, rel) if kind == "overlay" else ap
+        if dest not in staged:
+            value = _read_current(ctx, path)[0] if ctx.executor.exists(dest) or ctx.executor.exists(ap) else None
+            staged[dest] = originals[dest] = value
+            names[dest] = path
+        return dest, kind, ap
+
+    i = 1
+    while i < len(lines) - 1:
+        header = lines[i]
+        operation = next((op for op in ("Add", "Delete", "Update") if header.startswith(f"*** {op} File: ")), None)
+        if operation is None:
+            raise ToolError(f"invalid patch header: {header!r}")
+        path = header.split(": ", 1)[1]
+        dest, kind, ap = target(path)
+        before = staged[dest]
+        i += 1
+        if operation == "Delete":
+            if before is None:
+                raise ToolError(f"no such file: {path}")
+            staged[dest] = None
+            continue
+        if operation == "Add":
+            if before is not None:
+                raise ToolError(f"file already exists: {path}")
+            added = []
+            while i < len(lines) - 1 and lines[i].startswith("+"):
+                added.append(lines[i][1:])
+                i += 1
+            staged[dest] = "\n".join(added) + ("\n" if added else "")
+            continue
+        if before is None:
+            raise ToolError(f"no such file: {path}")
+        move = None
+        if lines[i].startswith("*** Move to: "):
+            move = lines[i][13:]
+            i += 1
+        current = before.splitlines()
+        cursor, hunks = 0, 0
+        while i < len(lines) - 1 and (lines[i] == "@@" or lines[i].startswith("@@ ")):
+            anchor = lines[i][2:].strip()
+            i += 1
+            body = []
+            while i < len(lines) - 1 and lines[i][:1] in (" ", "-", "+"):
+                body.append(lines[i])
+                i += 1
+            eof = lines[i] == "*** End of File"
+            if eof:
+                i += 1
+            if not body:
+                raise ToolError(f"{path}: empty hunk")
+            old = [line[1:] for line in body if line[0] != "+"]
+            new = [line[1:] for line in body if line[0] != "-"]
+            start = cursor
+            if anchor:
+                found = next((j for j in range(cursor, len(current)) if current[j] == anchor), None)
+                if found is None:
+                    raise ToolError(f"{path}: hunk did not match: {body[0]!r} (anchor {anchor!r})")
+                start = found + 1
+            match = next((j for j in range(start, len(current) - len(old) + 1)
+                          if current[j:j + len(old)] == old and (not eof or j + len(old) == len(current))), None)
+            if match is None:
+                raise ToolError(f"{path}: hunk did not match: {body[0]!r}")
+            current[match:match + len(old)] = new
+            cursor = match + len(new)
+            hunks += 1
+        if not hunks:
+            raise ToolError(f"{path}: update needs a hunk")
+        after = "\n".join(current) + ("\n" if current and before.endswith("\n") else "")
+        if move:
+            moved, _, _ = target(move)
+            if moved != dest and staged[moved] is not None:
+                raise ToolError(f"move destination already exists: {move}")
+            staged[dest] = None
+            staged[moved] = after
+        else:
+            staged[dest] = after
+    diffs = []
+    for dest, value in staged.items():
+        # Removing a copy restores the underlying original, rather than deleting it.
+        kind, ap, _ = _resolve(ctx, names[dest])
+        effective = ctx.executor.read_text(ap) if value is None and kind == "overlay" and ctx.executor.exists(ap) else value
+        diffs.append(_file_diff(names[dest], originals[dest] or "", effective or ""))
+    for dest, value in staged.items():
+        if value is None:
+            ctx.executor.remove(dest)
+        else:
+            ctx.executor.write_text(dest, value)
+    return {"files": list(names.values()), "diff": "".join(diffs)[:4000]}
 
 
 def t_diff(ctx, path=None):
@@ -365,13 +573,22 @@ def build_registry() -> Registry:
                    "claim": S, "predict_pct": {"type": "number"}}),
              t_bench, (W, V), order=2, light=False, returns="reference, candidate, delta_pct, bench_id."))
     add(Tool("read", "Read a file: a venv file by package path (e.g. vllm/...; shows your edited copy if any), "
-             "a workspace file, or a model-dir file.", _obj({"path": S, "start": I, "lines": I}, ["path"]),
+             "a workspace file, or a model-dir file; directories return a listing.", _obj({"path": S, "start": I, "lines": I}, ["path"]),
              t_read, (W, V), order=10))
     add(Tool("search", "Regex search (grep -E) under a venv package or workspace path.",
-             _obj({"pattern": S, "path": S, "max_hits": I}, ["pattern"]), t_search, (W, V), order=11))
+             _obj({"pattern": S, "path": S, "max_hits": I, "context": {"type": "integer", "default": 0},
+                   "include": S, "ignore_case": B}, ["pattern"]), t_search, (W, V), order=11))
     add(Tool("edit", "Edit a file. Venv files (package path) are edited as a copy in your workspace, never in "
-             "place. old+new replaces one exact unique occurrence; content writes the whole file.",
-             _obj({"path": S, "old": S, "new": S, "content": S}, ["path"]), t_edit, (W,), order=12))
+             "place. old+new replaces unique text (with whitespace fallback); replace_all replaces all exact matches; content writes the whole file.",
+             _obj({"path": S, "old": S, "new": S, "content": S, "replace_all": B}, ["path"]), t_edit, (W,), order=12))
+    add(Tool("apply_patch", "Apply a Begin Patch/End Patch envelope with Add File, Delete File, Update File, optional Move to, and @@ hunks; validate all changes before writing.",
+             _obj({"patch": S}, ["patch"]), t_apply_patch, (W,), order=12))
+    add(Tool("ls", "List a directory with sizes and edited-copy markers, capped at 300 entries.",
+             _obj({"path": {"type": "string", "default": "."}, "depth": {"type": "integer", "default": 1}}),
+             t_ls, (W,), order=10))
+    add(Tool("glob", "Find files by glob pattern under a path, capped at 200 files.",
+             _obj({"pattern": S, "path": {"type": "string", "default": "vllm"}}, ["pattern"]),
+             t_glob, (W,), order=11))
     add(Tool("diff", "Unified diff of your edited venv files against the originals.", _obj({"path": S}), t_diff,
              (W, V), order=13))
     add(Tool("revert", "Drop your edited copy of a venv file.", _obj({"path": S}, ["path"]), t_revert, (W,),
