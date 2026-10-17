@@ -13,6 +13,7 @@ import glob
 import json
 import math
 import os
+import socket
 import time
 from collections import Counter, defaultdict, deque
 from datetime import datetime
@@ -457,7 +458,33 @@ class Reader:
         self.lines: dict[str, list[dict]] = {}  # non-mission jsonl sources, path -> records (bounded)
         self.sources: dict[str, dict] = {}
         self.meta_mtimes: dict[str, float] = {}
+        self._local: str | None = None
         self.spend_series: list[tuple[float, float]] = []
+
+    def local_machine(self) -> str:
+        """Fleet name of the machine this root belongs to (for rows that leave `machine` empty)."""
+        if self._local is None:
+            name = None
+            try:
+                name = _pick(_read_json(self._p("machine.json")), "name")
+            except (OSError, ValueError):
+                pass
+            if not name:
+                host = socket.gethostname()
+                try:
+                    import yaml  # type: ignore
+                    with open(self._p("forge", "fleet", "machines.yaml"), encoding="utf-8") as f:
+                        doc = yaml.safe_load(f)
+                    items = doc if isinstance(doc, list) else (_pick(doc, "machines", default=None) or
+                                                               [dict(v, name=k) for k, v in (doc or {}).items()
+                                                                if isinstance(v, dict)])
+                    name = next((m.get("name") for m in items if isinstance(m, dict) and m.get("hostname") == host),
+                                None)
+                except Exception:
+                    pass
+                name = name or host
+            self._local = str(name)
+        return self._local
 
     # -- file plumbing
     def _p(self, *parts: str) -> str:
@@ -651,7 +678,7 @@ class Reader:
             ledger[str(gid)] = {**ledger.get(str(gid), {}), **{k: v for k, v in r.items() if v is not None},
                                 "_box": box}
         for r in sorted(ledger.values(), key=lambda r: _ts(r.get("t")) or 0):
-            machine = str(_pick(r, "machine", "_box", default="?"))
+            machine = str(_pick(r, "machine", "_box", default=None) or self.local_machine())
             gm = g(machine)
             gm["_has_ledger"] = True
             st = str(r.get("status") or "").lower()
@@ -806,16 +833,17 @@ class Reader:
             rate = _num(_pick(m, "usd_per_hour", "usd_per_hr", "dph", "usd_hr", "rate"))
             if rate is None and not _pick(m, "rental_id", "instance", "spent_usd"):
                 continue  # a local machine, not a rental
-            started = _ts(_pick(m, "started_at", "start_ts"))
+            started = _ts(_pick(m, "started_at", "rented_at", "start_ts"))
             ended = _ts(_pick(m, "returned_at", "ended_at"))
-            active = ended is None and str(_pick(m, "status", default="active")).lower() not in (
-                "returned", "destroyed", "stopped")
+            status = str(_pick(m, "status", default="active")).lower()
+            active = ended is None and status not in ("returned", "destroyed", "stopped", "registered", "failed",
+                                                      "expired")
             spent = _num(_pick(m, "spent_usd", "total_usd", "spent"))
             if spent is None and rate is not None and started is not None:
                 spent = rate * max(0.0, ((ended or now) - started)) / 3600
             vast.append({"rental": key, "machine": _pick(m, "name", "machine", "building", default=key),
                          "gpu_class": _pick(m, "gpu_class", "gpu"), "usd_per_hr": rate,
-                         "spent_usd": spent, "active": active,
+                         "spent_usd": spent, "active": active, "status": status,
                          "hours_left": _num(_pick(m, "hours_left"))})
         vast.sort(key=lambda v: (not v["active"], v["machine"] or ""))
         crusoe_total = sum(by_role.values())

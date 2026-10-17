@@ -200,9 +200,13 @@ function renderGates(s) {
       : `<div class="now muted">idle</div>`;
     const q = (g.queued || []).map((x) => `<span class="chip"${tipAttr(x.claim || x.bundle || "")}>${ICON.clock.replace("<svg", '<svg style="width:1em;height:1em"')} ${esc(x.mission || x.request_id || "?")}</span>`).join("");
     const vs = (g.verdicts || []).slice(0, 5).map((v) => {
-      const res = v.win && v.lossless !== false ? '<span class="badge win">WIN</span>' : v.lossless === false ? '<span class="badge lossy">LOSSY</span>' : '<span class="badge lose">no win</span>';
+      const vd = (v.verdict || "").toLowerCase();
+      const res = v.win && v.lossless !== false ? '<span class="badge win">WIN</span>'
+        : v.lossless === false || vd === "lossy" ? '<span class="badge lossy">LOSSY</span>'
+        : ["invalid", "error"].includes(vd) ? `<span class="badge lose">${esc(vd.toUpperCase())}</span>`
+        : '<span class="badge lose">no win</span>';
       const tip = `${v.verdict_id} · ${v.kind || ""} · ${v.pairs ?? "?"} pairs · mean log-gain ${fmt(v.mean_log_gain, 4)} (bar ${fmt(v.threshold, 4)})${v.lossless_detail?.top1 != null ? ` · top-1 ${v.lossless_detail.top1}` : ""}${v.reason ? " · " + v.reason : ""}`;
-      return `<div class="vrow"${tipAttr(tip)}><span class="vid">${esc(v.verdict_id)}</span><span class="rec">${esc(v.recipe || v.mission || "")}</span>${pairDots(v.pair_gains) || (v.pairs != null ? `<span class="muted">${esc(v.pairs)} pairs</span>` : "<span></span>")}<span class="g">${v.delta_pct != null ? (v.delta_pct >= 0 ? "+" : "") + fmt(v.delta_pct, 1) + "%" : ""}</span>${res}</div>`;
+      return `<div class="vrow"${tipAttr(tip)}><span class="vid">${esc(String(v.verdict_id).slice(-6))}</span><span class="rec">${esc(v.recipe || v.mission || "")}${v.kind && v.kind !== "candidate" ? ` <span class="muted">${esc(v.kind)}</span>` : ""}</span>${pairDots(v.pair_gains) || (v.pairs != null ? `<span class="muted">${esc(v.pairs)} pairs</span>` : "<span></span>")}<span class="g">${v.delta_pct != null ? (v.delta_pct >= 0 ? "+" : "") + fmt(v.delta_pct, 1) + "%" : ""}</span>${res}</div>`;
     }).join("");
     return `<div class="gate">
       <div class="gh"><span class="m">${esc(g.machine)}</span>${g.quiet === false ? '<span class="sev warning">' + ICON.warn + "not quiet</span>" : ""}
@@ -337,7 +341,7 @@ function renderSpend(s) {
   const bars = roles.length ? roles.map(([r, x]) => `<div class="hbar"><span>${esc(r)}</span><div class="t"><div class="f" style="width:${((x / rmax) * 100).toFixed(1)}%;background:${ROLE_COLOR[r] || "var(--c7)"}"></div></div><span class="v">${usd(x)}</span></div>`).join("")
     : '<div class="muted" style="font-size:.85em">No calls yet.</div>';
   const rent = (v.machines || []).map((m) => `<span class="dot ${m.active ? "on" : "idle"}"></span><span>${esc(m.machine)} <span class="muted">${esc(m.gpu_class || "")}</span></span>
-    <span class="r muted">${m.usd_per_hr != null ? usd(m.usd_per_hr) + "/h" : ""}</span><span class="r">${usd(m.spent_usd)}</span>`).join("");
+    <span class="r muted">${m.usd_per_hr != null ? usd(m.usd_per_hr) + "/h" : esc(m.status || "")}</span><span class="r">${usd(m.spent_usd)}</span>`).join("");
   $("spend").innerHTML = `<div class="tiles">
       <div class="tile"><div class="l">Crusoe inference</div><div class="v num">${usd(c.total)}</div><div class="s">${roles.length} roles</div></div>
       <div class="tile"><div class="l">Vast burn</div><div class="v num">${usd(v.burn_usd_per_hr)}<span class="muted" style="font-size:.5em">/h</span></div><div class="s">${(v.machines || []).filter((m) => m.active).length} boxes active</div></div>
