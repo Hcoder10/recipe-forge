@@ -5,9 +5,11 @@ Every call is metered (tokens, cached tokens, $) into the mission's usage log.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import random
+import socket
 import threading
 import time
 import urllib.error
@@ -17,6 +19,51 @@ from pathlib import Path
 from typing import Any, Callable
 
 from forge.agents.config import PRICES, ModelSpec, Profile
+
+
+def _connect_v4_first(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, *a, **kw):
+    """Like socket.create_connection but IPv4 first: on the rig the API's IPv6 addresses are unreachable and
+    each costs a full connect timeout before urllib falls back."""
+    host, port = address
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)
+    last: OSError | None = None
+    for fam, typ, proto, _canon, sa in infos:
+        sock = socket.socket(fam, typ, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            sock.connect(sa)
+            return sock
+        except OSError as e:
+            last = e
+            sock.close()
+    raise last or OSError(f"cannot resolve {host}")
+
+
+class _V4HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._create_connection = _connect_v4_first
+
+
+class _V4HTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._create_connection = _connect_v4_first
+
+
+class _V4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_V4HTTPSConnection, req, context=self._context)
+
+
+class _V4HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_V4HTTPConnection, req)
+
+
+_OPENER = urllib.request.build_opener(_V4HTTPSHandler(), _V4HTTPHandler())
 
 
 class LLMError(Exception):
@@ -46,8 +93,8 @@ class Usage:
     cached: int = 0
     completion: int = 0
 
-    def cost(self, tier: str) -> float:
-        p_in, p_cached, p_out = PRICES.get(tier, PRICES["ultra"])
+    def cost(self, tier: str | tuple) -> float:
+        p_in, p_cached, p_out = tier if isinstance(tier, tuple) else PRICES.get(tier, PRICES["ultra"])
         fresh = max(0, self.prompt - self.cached)
         return (fresh * p_in + self.cached * p_cached + self.completion * p_out) / 1e6
 
@@ -156,13 +203,13 @@ class LLMClient:
         req = urllib.request.Request(self.profile.base_url.rstrip("/") + path, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {self.api_key}"}, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+        with _OPENER.open(req, timeout=self.timeout_s) as r:
             return json.loads(r.read().decode())
 
     def list_models(self) -> list[str]:
         req = urllib.request.Request(self.profile.base_url.rstrip("/") + "/models",
                                      headers={"Authorization": f"Bearer {self.api_key}"})
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _OPENER.open(req, timeout=30) as r:
             data = json.loads(r.read().decode())
         return [m.get("id") for m in data.get("data", [])]
 
@@ -226,7 +273,7 @@ class LLMClient:
             args, err = parse_args(raw)
             calls.append(ToolCall(tc.get("id") or f"call_{int(t0 * 1000)}_{i}", fn.get("name") or "",
                                   args, raw if isinstance(raw, str) else json.dumps(raw or {}), err))
-        cost = usage.cost(model.tier)
+        cost = usage.cost(model.prices)
         self.meter.record({"t": round(t0, 3), "mission_id": mission_id, "role": role, "model": model.model_id,
                            "tier": model.tier, "prompt_tokens": usage.prompt, "cached_tokens": usage.cached,
                            "completion_tokens": usage.completion, "cost_usd": round(cost, 6),

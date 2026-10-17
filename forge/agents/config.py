@@ -12,11 +12,21 @@ from pathlib import Path
 CRUSOE_BASE_URL = "https://api.inference.crusoecloud.com/v1"
 SECRETS_FILE = Path.home() / "forge_secrets.env"
 
-# $ per million tokens: (input, cached input, output)
+# $ per million tokens: (input, cached input, output). Tier keys are role strengths, not model names:
+# "ultra" = the strongest model used (Lead, Verifier, Mechanic), "super" = Workers, "nano" = cheap helpers.
 PRICES: dict[str, tuple[float, float, float]] = {
     "ultra": (1.00, 0.25, 3.20),
     "super": (0.30, 0.15, 2.40),
     "nano": (0.05, 0.03, 0.20),
+}
+# Per model id, from Crusoe's /v1/models pricing (Oct 17). Crusoe serves no Nemotron Ultra, so the "ultra"
+# tier maps to Nemotron 3 Super 120B and Workers to Nemotron 3.5 Super-VL.
+MODEL_PRICES: dict[str, tuple[float, float, float]] = {
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B": (1.00, 0.25, 3.20),
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B": (0.30, 0.15, 2.40),
+    "nvidia/NVIDIA-Nemotron-3.5-Super-VL": (0.10, 0.08, 0.40),
+    "nvidia/Nemotron-3.5-Lightning-30B-A3B": (0.05, 0.03, 0.20),
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": (0.05, 0.03, 0.20),
 }
 
 
@@ -27,6 +37,10 @@ class ModelSpec:
     context: int         # hard context limit of the served model
     temperature: float = 0.2
     max_out: int = 4096
+
+    @property
+    def prices(self) -> tuple[float, float, float]:
+        return MODEL_PRICES.get(self.model_id) or PRICES.get(self.tier, PRICES["ultra"])
 
 
 @dataclass
@@ -44,11 +58,11 @@ class Profile:
 def _crusoe_models() -> dict[str, ModelSpec]:
     return {
         "ultra": ModelSpec("ultra", os.environ.get("FORGE_ULTRA_MODEL",
-                                                   "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B"), 131072),
+                                                   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"), 262144),
         "super": ModelSpec("super", os.environ.get("FORGE_SUPER_MODEL",
-                                                   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B"), 131072),
+                                                   "nvidia/NVIDIA-Nemotron-3.5-Super-VL"), 262144),
         "nano": ModelSpec("nano", os.environ.get("FORGE_NANO_MODEL",
-                                                 "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B"), 131072),
+                                                 "nvidia/Nemotron-3.5-Lightning-30B-A3B"), 262144),
     }
 
 

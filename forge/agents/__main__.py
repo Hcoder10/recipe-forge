@@ -100,6 +100,35 @@ def cmd_selftest(a) -> int:
     return 0 if ok else 1
 
 
+def build_spec(recipe_id: str, machine_name: str, *, minutes: float = 75, budget: float = 15, workers: int = 3,
+               goal: str = "", mission_id: str | None = None, playbook: str | None = None,
+               profile: str = "crusoe") -> dict:
+    """A mission spec from the fleet catalog (forge.recipes) and machine registry (forge.fleet.machines)."""
+    import time
+    from forge.fleet.machines import get_machine, python_for
+    from forge.recipes import get
+    m = get_machine(machine_name)
+    r = get(recipe_id, gpu_class=m.get("gpu_class"))
+    mid = mission_id or f"{r['id'].replace('.', '-')}-{m['name']}-{time.strftime('%m%d-%H%M%S')}"
+    return {"mission_id": mid, "recipe": r, "machine": m, "python": python_for(m, r),
+            "gpu_class": m.get("gpu_class"), "time_box_min": minutes, "budget_usd": budget,
+            "team": {"workers": workers}, "goal": goal, "playbook": playbook, "profile": profile,
+            "hf_home": (m.get("env") or {}).get("HF_HOME")}
+
+
+def cmd_mission(a) -> int:
+    spec = build_spec(a.recipe, a.machine, minutes=a.minutes, budget=a.budget, workers=a.workers, goal=a.goal,
+                      mission_id=a.id, playbook=a.playbook, profile=a.profile)
+    out = json.dumps(spec, indent=1, default=str)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(out)
+        print(a.out)
+    else:
+        print(out)
+    return 0
+
+
 def cmd_answer(a) -> int:
     from forge.agents import events
     from forge.agents.config import state_root
@@ -119,13 +148,24 @@ def main(argv=None) -> int:
     p = sub.add_parser("probe")
     p.add_argument("--profile", default="crusoe", choices=["crusoe", "local"])
     sub.add_parser("selftest")
+    ms = sub.add_parser("mission", help="write a mission spec from the catalog")
+    ms.add_argument("--recipe", required=True)
+    ms.add_argument("--machine", required=True)
+    ms.add_argument("--minutes", type=float, default=75)
+    ms.add_argument("--budget", type=float, default=15)
+    ms.add_argument("--workers", type=int, default=3)
+    ms.add_argument("--goal", default="")
+    ms.add_argument("--id")
+    ms.add_argument("--playbook")
+    ms.add_argument("--profile", default="crusoe")
+    ms.add_argument("--out")
     an = sub.add_parser("answer")
     an.add_argument("mission")
     an.add_argument("question")
     an.add_argument("text")
     an.add_argument("--to")
     a = ap.parse_args(argv)
-    return {"run": cmd_run, "probe": cmd_probe, "selftest": cmd_selftest, "answer": cmd_answer}[a.cmd](a)
+    return {"run": cmd_run, "probe": cmd_probe, "selftest": cmd_selftest, "answer": cmd_answer, "mission": cmd_mission}[a.cmd](a)
 
 
 if __name__ == "__main__":
