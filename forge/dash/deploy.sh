@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Deploy forge/dash to the rig and (re)start it on :8790.   usage: forge/dash/deploy.sh [user@host]
-# Copies only forge/dash (tar over ssh, no git on the rig) and restarts only the dash process it started.
+# Copies only forge/dash, forge/tui and tests/dash (tar over ssh, no git on the rig) and restarts only the dash process it started.
 set -euo pipefail
 HOST="${1:-cube@100.68.107.11}"
 cd "$(dirname "$0")/../.."
-tar --exclude=__pycache__ -cf - forge/__init__.py forge/dash | ssh "$HOST" 'mkdir -p ~/forge && tar -xf - -C ~/forge'
+tar --exclude=__pycache__ -cf - forge/__init__.py forge/dash forge/tui tests/dash | ssh "$HOST" 'mkdir -p ~/forge && tar -xf - -C ~/forge'
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
 cd ~/forge
