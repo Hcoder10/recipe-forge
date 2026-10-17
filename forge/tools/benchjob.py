@@ -344,9 +344,11 @@ def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: st
     if spec.get("mode") == "profile":
         trace = work / "trace"
         trace.mkdir(parents=True, exist_ok=True)
-        env["VLLM_TORCH_PROFILER_DIR"] = str(trace)
         if spec.get("profiler_config"):
-            argv += ["--profiler-config", json.dumps({"profiler": "torch", "torch_profiler_dir": str(trace)})]
+            argv += ["--profiler-config", json.dumps({"profiler": "torch", "torch_profiler_dir": str(trace),
+                                                     **spec.get("profiler_options", {})})]
+        else:
+            env["VLLM_TORCH_PROFILER_DIR"] = str(trace)
     t0 = time.time()
     if spec.get("sandbox", True):
         ro_extra = [str(hook)] if hook.exists() else []
@@ -402,8 +404,8 @@ def parse_trace(trace, steps: int, decode_windows=None) -> dict:
                   and float(e.get("dur", 0)) > 0]
     if not activities or steps <= 0:
         raise ValueError("no decode GPU activities")
-    windows = decode_windows or [(min(e["ts"] for e in activities),
-                                 max(e["ts"] + e["dur"] for e in activities))]
+    windows = ([(min(e["ts"] for e in activities), max(e["ts"] + e["dur"] for e in activities))]
+               if decode_windows is None else decode_windows)
     def merged(intervals):
         result = []
         for start, end in sorted(intervals):
@@ -468,6 +470,11 @@ def extract_structure(config: dict, recipe=None) -> dict:
             drafter = json.loads(drafter)
         except ValueError:
             drafter = {}
+    drafter = dict(drafter) if isinstance(drafter, dict) else {}
+    for key in ("model", "method", "num_speculative_tokens"):
+        value = flags.get("--speculative-config." + key.replace("_", "-"))
+        if value is not None:
+            drafter[key] = int(value) if key == "num_speculative_tokens" else value
     structure["drafter_config"] = {k: drafter[k] for k in ("model", "method", "num_speculative_tokens")
                                    if isinstance(drafter, dict) and k in drafter}
     return structure
@@ -524,6 +531,14 @@ print(json.dumps(str(Path(s.origin).parent) if s else None))
             legacy |= '"VLLM_TORCH_PROFILER_DIR"' in source or "'VLLM_TORCH_PROFILER_DIR'" in source
             modern |= "torch_profiler_dir" in source and "ProfilerConfig" in source
         spec["profiler_config"] = modern
+        if modern:
+            config_source = (root / "config/profiler.py")
+            source = config_source.read_text() if config_source.is_file() else ""
+            spec["profiler_options"] = {k: v for k, v in {
+                "ignore_frontend": True, "torch_profiler_with_stack": False,
+                "torch_profiler_dump_cuda_time_total": False,
+                "torch_profiler_use_gzip": True,
+            }.items() if re.search(r"\b" + k + r"\s*:", source)}
         available = endpoints and (legacy or modern)
     else:
         available = False
@@ -531,7 +546,9 @@ print(json.dumps(str(Path(s.origin).parent) if s else None))
 
 
 def profile_workload(port, recipe, spec, work):
-    model = recipe.get("served_model_name") or recipe["model"]
+    from forge.tools.bundle import args_to_dict
+    flags = args_to_dict(recipe.get("serve_args"))
+    model = recipe.get("served_model_name") or flags.get("--served-model-name") or recipe["model"]
     chat = spec["workload"].get("chat") or None
     if chat is True:
         chat = {"on": True}
@@ -542,6 +559,8 @@ def profile_workload(port, recipe, spec, work):
         with urllib.request.urlopen(req, timeout=180):
             pass
     windows, decode_steps = [], 0
+    trace_dir = work / "trace"
+    existing = set(trace_dir.rglob("*"))
     post("start")
     try:
         for _ in range(int(spec.get("n_prompts") or 4)):
@@ -553,18 +572,39 @@ def profile_workload(port, recipe, spec, work):
             windows.append((stamps[0], stamps[-1]))
             decode_steps += result["tokens"] - 1
     finally:
-        post("stop")
-    traces = sorted((work / "trace").rglob("*.json.gz"))
-    if not traces:
-        traces = sorted((work / "trace").rglob("*.json"))
-    if len(traces) != 1:
-        raise ValueError("expected one GPU trace")
-    opener = gzip.open if traces[0].suffix == ".gz" else open
-    with opener(traces[0], "rt", encoding="utf-8") as f:
-        trace = json.load(f)
-    base = trace.get("baseTimeNanoseconds", 0) / 1000
-    result = parse_trace(trace, decode_steps, [(a - base, b - base) for a, b in windows])
-    return {**result, "trace_path": str(traces[0]), "window_basis": "first-to-last streamed content per request"}
+        try:
+            post("stop")
+        finally:
+            if sys.exc_info()[0] is not None:
+                for path in trace_dir.rglob("*"):
+                    if path not in existing and path.is_file() and (
+                            path.name.endswith(".json") or path.name.endswith(".json.gz")):
+                        path.unlink(missing_ok=True)
+    return parse_profile_traces(trace_dir, existing, decode_steps, windows)
+
+
+def parse_profile_traces(trace_dir, existing, decode_steps, windows):
+    """Ignore frontend-only traces and remove only artifacts from this capture."""
+    traces = sorted(p for p in trace_dir.rglob("*") if p not in existing and p.is_file()
+                    and (p.name.endswith(".json.gz") or p.name.endswith(".json")))
+    results = []
+    try:
+        for path in traces:
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rt", encoding="utf-8") as f:
+                trace = json.load(f)
+            if not any(e.get("ph") == "X" and "kernel" in e.get("cat", "").lower()
+                       for e in trace.get("traceEvents", [])):
+                continue
+            base = trace.get("baseTimeNanoseconds", 0) / 1000
+            results.append(parse_trace(trace, decode_steps, [(a - base, b - base) for a, b in windows]))
+        if len(results) != 1:
+            raise ValueError("expected one GPU trace")
+        return {**results[0], "trace_path": None, "trace_removed": True,
+                "window_basis": "first-to-last streamed content per request"}
+    finally:
+        for path in traces:
+            path.unlink(missing_ok=True)
 
 
 def run_profile(spec, work, gpu):
@@ -572,7 +612,7 @@ def run_profile(spec, work, gpu):
            "launches_per_step": None, "top_kernels": [], "trace_path": None, "model_files": []}
     key = hashlib.sha256(canon({"recipe": spec["recipe"], "gpu": gpu,
                                "steps": spec.get("steps", 64), "n": spec.get("n_prompts"),
-                               "version": 1}).encode()).hexdigest()[:20]
+                               "version": 2}).encode()).hexdigest()[:20]
     cache = Path(spec["ref_cache_dir"]) / f"arch-{key}.json"
     try:
         if cache.exists() and not gpu["uuid"].startswith("unknown-"):
