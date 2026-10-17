@@ -90,19 +90,32 @@ def _inside(child: str, parent: str) -> bool:
 
 
 def gpu_nodes(indexes: list[int]) -> list[str]:
-    """Map nvidia-smi indexes (PCI bus order) to /dev/nvidiaN via the driver's minor numbers."""
-    infos = sorted(glob.glob("/proc/driver/nvidia/gpus/*/information"))
-    nodes = []
-    for idx in indexes:
-        if idx >= len(infos):
-            raise SandboxError(f"no GPU with index {idx}")
-        minor = None
-        with open(infos[idx]) as f:
-            for line in f:
-                if line.startswith("Device Minor"):
-                    minor = int(line.split(":")[1])
-        nodes.append(f"/dev/nvidia{idx if minor is None else minor}")
-    return nodes
+    """Map visible nvidia-smi indexes to /dev/nvidiaN through PCI bus ids and the driver's minor numbers.
+
+    In containers /proc/driver/nvidia/gpus lists every host GPU, so list position is not the index."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=True, timeout=10).stdout
+        buses = {}
+        for line in out.splitlines():
+            index, pci = (p.strip() for p in line.split(",", 1))
+            domain, bus, slot = pci.lower().split(":")
+            buses[int(index)] = f"{int(domain, 16):04x}:{bus}:{slot}"
+        nodes = []
+        for idx in indexes:
+            if idx not in buses:
+                raise SandboxError(f"no visible GPU with index {idx}")
+            with open(f"/proc/driver/nvidia/gpus/{buses[idx]}/information") as f:
+                minors = [int(line.split(":", 1)[1]) for line in f if line.startswith("Device Minor")]
+            if len(minors) != 1:
+                raise SandboxError(f"cannot resolve device minor for GPU {idx}")
+            node = f"/dev/nvidia{minors[0]}"
+            if not os.path.exists(node):
+                raise SandboxError(f"GPU {idx} device node {node} is not present")
+            nodes.append(node)
+        return nodes
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        raise SandboxError(f"cannot resolve visible GPU device nodes: {e}") from e
 
 
 def build_rules(spec: Spec) -> tuple[list[tuple[str, int]], dict]:
