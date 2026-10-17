@@ -353,8 +353,8 @@ class MissionRunner:
         if not m.bench_prompts.startswith("/") and machine.get("forge_root"):
             m.bench_prompts = posixpath.join(machine["forge_root"], m.bench_prompts)
         snap = spec.get("model_dir") or _snapshot_dir(self.executor, python, recipe["model"], m.hf_home)
-        m.serve_cwd = (spec.get("serve_cwd") or spec.get("recipe_files_dir") or machine.get("extra_files_dir")
-                       or snap)
+        cwd_opts = [spec.get("serve_cwd"), spec.get("recipe_files_dir"), machine.get("extra_files_dir")]
+        m.serve_cwd = next((d for d in cwd_opts if d and self.executor.exists(d)), None) or snap
         if snap:
             m.readable_roots.append(snap)
         self.meter = Meter(self.dir / "usage.jsonl", self.mission.budget_usd)
