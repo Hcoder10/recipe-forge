@@ -31,7 +31,7 @@ def register_rental(rental: dict, gpu_class: str, recipes: list[str], image: str
         "ssh": {"host": rental.get("ssh_host"), "port": rental.get("ssh_port"), "user": "root"},
         "forge_root": BOX_ROOT, "gpu_class": gpu_class, "gpus": {"timing": [0], "work": []},
         "python": "python3", "sched_python": "python3", "python_for": {}, "recipes": list(recipes),
-        "image": image, "usd_per_hour": rental.get("usd_per_hour"), "rented_at": rental.get("created_at"),
+        "image": image, "usd_per_hour": rental.get("usd_per_hour"), "rented_at": rental.get("created_at"), "started_at": rental.get("created_at"),
         "expires_at": rental.get("expires_at"),
         "env": {"HF_HOME": "/root/hf", "FORGE_ROOT": BOX_ROOT, "LANDLORD_URL": BOX_LANDLORD,
                 "LANDLORD_BUILDING": rental.get("building") or f"vast-{inst}", "PYTHONPATH": BOX_ROOT},
@@ -87,7 +87,16 @@ def install(m: dict) -> int:
     return n
 
 
-def start_setup(m: dict) -> None:
+def restart_services(m: dict) -> None:
+    """Redeploy-time restart: stop the sched daemon and gate service this fleet started on a box (single
+    tenant), then rerun setup's sched/gate steps on the new code, rewriting the gate lock."""
+    ex = executor_for(m)
+    ex.sh("pkill -TERM -f '[f]orge.gate.service' ; pkill -TERM -f '[f]orge.sched.daemon' ; sleep 8; "
+          "pgrep -f '[f]orge.(gate.service|sched.daemon)' || true", timeout_s=60)
+    start_setup(m, redo="sched,gate_lock,gate_service")
+
+
+def start_setup(m: dict, redo: str = "") -> None:
     ex = executor_for(m)
     plan = {"name": m["name"], "building": m["building"], "gpu_class": m["gpu_class"], "recipes": m["recipes"],
             "landlord_url": BOX_LANDLORD, "timing": m["gpus"]["timing"], "work": m["gpus"]["work"]}
@@ -95,7 +104,8 @@ def start_setup(m: dict) -> None:
     st = ex.job_status("boxsetup")
     if st["state"] == "running":
         return
-    ex.start_job("boxsetup", f"python3 -m forge.fleet.boxsetup --plan {BOX_ROOT}/state/box_plan.json",
+    ex.start_job("boxsetup", f"python3 -m forge.fleet.boxsetup --plan {BOX_ROOT}/state/box_plan.json"
+                 + (f" --redo {redo}" if redo else ""),
                  cwd=BOX_ROOT, env=m.get("env"))
 
 

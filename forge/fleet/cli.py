@@ -176,6 +176,8 @@ def sync_rentals(log=print) -> list[dict]:
             continue
         prov.update_ssh(m, r)
         m["rental_status"] = r.get("status")
+        m["started_at"] = r.get("created_at") or m.get("started_at")
+        m["usd_per_hour"] = r.get("usd_per_hour") or m.get("usd_per_hour")
         m["spent_usd"] = r.get("spent_usd")
         m["hours_left"] = r.get("hours_left")
         save_machine(m)

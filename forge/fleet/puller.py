@@ -30,6 +30,12 @@ def pairs(m: dict) -> list[tuple[str, Path]]:
             (f"{r}/state/results/gate", RIG_ROOT / "state" / "results" / "gate" / m["name"])]
 
 
+def ledger_pairs(m: dict) -> list[tuple[str, Path]]:
+    """Single files pulled whole when they grow: the box gate ledger (agent-safe rows, per core.md)."""
+    r = m.get("forge_root", "/root/forge")
+    return [(f"{r}/gate/ledger.jsonl", RIG_ROOT / "results" / "boxes" / m["name"] / "gate" / "ledger.jsonl")]
+
+
 def local_manifest(d: Path) -> dict[str, int]:
     out = {}
     if d.is_dir():
@@ -48,6 +54,16 @@ def pull_machine(m: dict) -> dict:
         want = [rel for rel, (size, _) in remote_files.items() if have.get(rel) != size]
         if want:
             got += ex.get_files(remote, want, local)
+    for remote, local in ledger_pairs(m):
+        r = ex.run(f"stat -c %s {remote} 2>/dev/null", timeout_s=60)
+        size = int(r.stdout.strip()) if r.ok and r.stdout.strip().isdigit() else None
+        if size is not None and (not local.exists() or local.stat().st_size != size):
+            data = ex.read_bytes(remote)
+            local.parent.mkdir(parents=True, exist_ok=True)
+            tmp = local.with_suffix(".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, local)
+            got += 1
     return {"files": got, "t": time.time(), "ok": True}
 
 

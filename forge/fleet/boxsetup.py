@@ -95,6 +95,7 @@ def download(repo: str, tries: int = 4) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
+    ap.add_argument("--redo", default="", help="comma list of steps to rerun (e.g. sched,gate_lock,gate_service)")
     a = ap.parse_args(argv)
     with open(a.plan) as f:
         plan = json.load(f)
@@ -103,6 +104,8 @@ def main(argv=None) -> int:
     st = load_status()
     st["plan"] = plan
     st.pop("failed", None)
+    for name in [s for s in a.redo.split(",") if s]:
+        st["steps"].pop(name, None)
     save_status(st)
     recipes = [get_recipe(b, plan.get("gpu_class")) for b in plan["recipes"]]
 
@@ -174,16 +177,20 @@ def main(argv=None) -> int:
 
     step(st, "sched", sched)
 
+    def gate_lock():
+        env = {**os.environ, "FORGE_ROOT": ROOT, "PYTHONPATH": ROOT}
+        out = subprocess.run([sys.executable, "-m", "forge.gate.lock", "write", "--name", "main"], env=env,
+                             cwd=ROOT, capture_output=True, text=True, timeout=300)
+        if out.returncode != 0:
+            raise RuntimeError(f"gate lock: {(out.stdout + out.stderr)[-500:]}")
+        return {"out": (out.stdout or "")[-200:]}
+
     def gate_service():
         env = {**os.environ, "FORGE_ROOT": ROOT, "PYTHONPATH": ROOT, "LANDLORD_URL": plan["landlord_url"]}
-        if not os.path.exists(os.path.join(ROOT, "gate", "locks", "main.json")):
-            out = subprocess.run([sys.executable, "-m", "forge.gate.lock", "write", "--name", "main"], env=env,
-                                 cwd=ROOT, capture_output=True, text=True, timeout=300)
-            if out.returncode != 0:
-                raise RuntimeError(f"gate lock: {(out.stdout + out.stderr)[-500:]}")
         ps = subprocess.run(["bash", "-c", "pgrep -f '[f]orge.gate.service' || true"], capture_output=True, text=True)
         if ps.stdout.strip():
             return {"already": ps.stdout.split()}
+        os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
         lf = open(os.path.join(STATE, "logs", "gate.log"), "ab")
         p = subprocess.Popen([sys.executable, "-m", "forge.gate.service"], env=env, stdout=lf, stderr=lf,
                              stdin=subprocess.DEVNULL, start_new_session=True, cwd=ROOT)
@@ -193,6 +200,7 @@ def main(argv=None) -> int:
         return {"pid": p.pid}
 
     if plan.get("gate", True):
+        step(st, "gate_lock", gate_lock)
         step(st, "gate_service", gate_service)
     st["ready"] = True
     st["ready_at"] = time.time()

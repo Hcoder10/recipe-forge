@@ -51,6 +51,10 @@ class RemoteGate:
     def status(self, gate_id: str) -> dict:
         return normalize_row(self._call("status", gate_id=gate_id))
 
+    def reference(self, recipe_id: str, reps: int = 6) -> dict:
+        """Queue a reference control (reference vs reference) on the target's gate."""
+        return normalize_row(self._call("reference", recipe_id=recipe_id, reps=reps, requester="fleet/setup"))
+
     def ledger(self, mission_id: str | None = None, recipe_id: str | None = None) -> list[dict]:
         rows = [normalize_row(r) for r in self._call("ledger", machine=self.machine.get("name"))]
         return [r for r in rows if (mission_id is None or r["mission_id"] == mission_id)
