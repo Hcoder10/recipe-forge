@@ -80,9 +80,10 @@ def allow_rig(m: dict, pub: str) -> None:
     ex.write_bytes("/root/.ssh/authorized_keys", ("\n".join(keys) + "\n").encode(), mode="600")
 
 
-def install(m: dict) -> int:
+def install(m: dict, src: Path | str | None = None) -> int:
+    """Copy forge to the box: from `src` (e.g. a clean `git archive HEAD` export) or the working tree."""
     ex = executor_for(m)
-    n = ex.put_tree(REPO, BOX_ROOT, excludes=("__pycache__", ".git", "state", "results", "*.pyc", "runs", ".claude"))
+    n = ex.put_tree(Path(src) if src else REPO, BOX_ROOT, excludes=("__pycache__", ".git", "state", "results", "*.pyc", "runs", ".claude"))
     ex.sh(f"mkdir -p {BOX_ROOT}/results {BOX_ROOT}/state")
     return n
 
