@@ -28,6 +28,7 @@ from forge.recipes import fits, get as get_recipe
 RIG_STATE = "/home/cube/forge/state"
 RIG_ROOT = "/home/cube/forge"
 SECRETS = "/home/cube/forge_secrets.env"
+VRAM_ASK = {"rtxpro6000_95g": 90, "rtx5090_32g": 29}
 
 
 def now() -> float:
@@ -95,6 +96,8 @@ class Controller:
                                          f"for NVIDIA's published recipe {r['id']} on {m['gpu_class']}.",
             "recipe_files_dir": f"{root}/state/recipe_files/{r['base_id']}",
             "wave": item.get("wave"),
+            # the bench job's VRAM ask must fit the card (it is exclusive on a timing GPU anyway)
+            "bench_vram_gb": item.get("bench_vram_gb", VRAM_ASK.get(m.get("gpu_class"), 90)),
         }
         return spec
 
@@ -265,17 +268,40 @@ class Controller:
         items = [i for i in self.queue() if i.get("wave") == wave]
         return bool(items) and all(i["status"] in ("done", "failed", "stopped", "cancelled") for i in items)
 
-    def next_wave(self, wave: int, held_out: list[tuple[str, str]]) -> dict:
+    def plan_path(self) -> Path:
+        return self.dir / "n1_plan.json"
+
+    def set_n1_plan(self, after_wave: int, held_out: list[tuple[str, str]], time_box_min: int) -> dict:
+        plan = {"after_wave": after_wave, "held_out": held_out, "time_box_min": time_box_min, "started": False}
+        _write(self.plan_path(), plan)
+        return plan
+
+    def n1_tick(self) -> dict | None:
+        """When the planned wave is finished, run Version N+1 once: propose, then queue the paired wave."""
+        plan = _read(self.plan_path(), None)
+        if not plan or plan.get("started") or not self.wave_done(plan["after_wave"]):
+            return None
+        plan["started"] = now()
+        _write(self.plan_path(), plan)
+        log = self.next_wave(plan["after_wave"], [tuple(x) for x in plan["held_out"]],
+                             time_box_min=plan.get("time_box_min"))
+        plan["log"] = log
+        _write(self.plan_path(), plan)
+        self.log(f"N+1: wave {plan['after_wave'] + 1} queued, proposed={log.get('proposed')}")
+        return log
+
+    def next_wave(self, wave: int, held_out: list[tuple[str, str]], time_box_min: int | None = None) -> dict:
         """After `wave` finishes: propose N+1 from its traces, then queue held-out (recipe, machine) pairs under
         the current and the proposed playbook (paired)."""
         mids = [i["mission_id"] for i in self.queue() if i.get("wave") == wave and i["status"] == "done"]
         base = self.mechanic("current")
         new = self.mechanic("propose", mids, base) if mids else None
         log = {"t": now(), "wave": wave, "base": base, "proposed": new, "missions": mids}
+        extra = {"time_box_min": time_box_min} if time_box_min else {}
         for rid, mname in held_out:
-            self.add(rid, mname, wave=wave + 1, playbook=base, arm="old")
+            self.add(rid, mname, wave=wave + 1, playbook=base, arm="old", **extra)
             if new:
-                self.add(rid, mname, wave=wave + 1, playbook=new, arm="new")
+                self.add(rid, mname, wave=wave + 1, playbook=new, arm="new", **extra)
         with open(self.dir / "waves.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(log) + "\n")
         return log

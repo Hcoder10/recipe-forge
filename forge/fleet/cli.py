@@ -230,6 +230,9 @@ def cmd_missions(a) -> int:
     c = Controller()
     if a.action == "add":
         p(c.add(a.recipe, a.machine, wave=a.wave, playbook=a.playbook))
+    elif a.action == "n1":
+        pairs = [tuple(x.split("@", 1)) for x in (a.pairs or "").split(",") if "@" in x]
+        p(c.set_n1_plan(a.wave, pairs, a.time_box))
     elif a.action == "plan":
         n = 0
         for name, m in all_machines().items():
@@ -249,12 +252,19 @@ def cmd_missions(a) -> int:
 def cmd_run_fleet(a) -> int:
     from forge.fleet.controller import Controller
     c = Controller(defaults={"profile": a.profile} if a.profile else None)
+    _judged: set = set()
     while True:
         try:
             boxes(provision=True)
             sync_registry(c.rig, get_machine("rig")["forge_root"])
             started = c.dispatch()
             finished = c.monitor()
+            c.n1_tick()
+            for w in sorted({i.get("wave") for i in c.queue() if i.get("arm")} - set(_judged)):
+                if c.wave_done(w):
+                    _judged.add(w)
+                    v = c.judge_wave(w)
+                    print(time.strftime("%H:%M:%S"), f"N+1 verdict for wave {w}:", v, flush=True)
             c.snapshot()
             if started or finished:
                 print(time.strftime("%H:%M:%S"), "started", started, "finished", finished, flush=True)
@@ -319,7 +329,9 @@ def main(argv=None) -> int:
     b = sub.add_parser("boxes")
     b.add_argument("--provision", action="store_true")
     ms = sub.add_parser("missions")
-    ms.add_argument("action", nargs="?", default="list", choices=["list", "add", "plan"])
+    ms.add_argument("action", nargs="?", default="list", choices=["list", "add", "plan", "n1"])
+    ms.add_argument("--pairs", help="n1: held-out recipe@machine list run under old and new playbook")
+    ms.add_argument("--time-box", type=int, default=45)
     ms.add_argument("recipe", nargs="?")
     ms.add_argument("machine", nargs="?")
     ms.add_argument("--wave", type=int, default=1)
