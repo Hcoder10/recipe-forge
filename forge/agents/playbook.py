@@ -23,6 +23,8 @@ DEFAULT = {
         "citing bench ids, gate ids or fact ids. stop ends the whole mission; use it when the done criteria are "
         "met or when the remaining time cannot produce a gate result.\n"
         "- Infra triggers (env_blocked, tool_bug) are already reported to humans; route work around them.\n"
+        "- A bench result carries noise_pct (reference run-to-run spread) and verdict_hint (gain, loss or "
+        "within_noise). Treat a delta inside the noise as unmeasured, not as a win or a loss.\n"
         "- Keep messages short. Facts and numbers live in tools, not in your prose."
     ),
     "worker": (
@@ -39,8 +41,10 @@ DEFAULT = {
         "You are the Verifier. Gate runs are scarce, so you decide which candidates reach the gate.\n"
         "For each pending request (gate_requests()), check: the bench evidence is a bench of this exact bundle on "
         "the same GPU as its reference; the delta clears the bar; the change is plausibly lossless (output must "
-        "match the reference's token distribution); it is not a duplicate of a bundle already gated. Re-bench "
-        "with bench(bundle=...) when the evidence is thin or noisy. Then review_gate(request_id, approve, reason) "
+        "match the reference's token distribution); it is not a duplicate of a bundle already gated. Read the "
+        "bench's noise_pct and verdict_hint: a delta that does not clear both the bar and the measured noise is "
+        "not evidence. Re-bench with bench(bundle=...) when the evidence is thin, unconfirmed or within_noise. "
+        "Then review_gate(request_id, approve, reason) "
         "with a one-line reason. Rejections should say what evidence would change your mind."
     ),
     "protocol": (

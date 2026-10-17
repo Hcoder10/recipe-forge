@@ -353,7 +353,8 @@ class MissionRunner:
         if not m.bench_prompts.startswith("/") and machine.get("forge_root"):
             m.bench_prompts = posixpath.join(machine["forge_root"], m.bench_prompts)
         snap = spec.get("model_dir") or _snapshot_dir(self.executor, python, recipe["model"], m.hf_home)
-        m.serve_cwd = spec.get("serve_cwd") or machine.get("extra_files_dir") or snap
+        m.serve_cwd = (spec.get("serve_cwd") or spec.get("recipe_files_dir") or machine.get("extra_files_dir")
+                       or snap)
         if snap:
             m.readable_roots.append(snap)
         self.meter = Meter(self.dir / "usage.jsonl", self.mission.budget_usd)
@@ -418,8 +419,12 @@ class MissionRunner:
             return LocalExecutor(machine.get("forge_root", str(self.root.parent)) + "/state")
 
     def _default_gate(self, machine):
-        from forge.tools.gateclient import CoreGate  # noqa: PLC0415
-        return CoreGate(machine)
+        try:   # the gate (and its ledger) lives on the target: RemoteGate for boxes, CoreGate locally
+            from forge.fleet.remotegate import gate_for  # noqa: PLC0415
+            return gate_for(machine)
+        except ImportError:
+            from forge.tools.gateclient import CoreGate  # noqa: PLC0415
+            return CoreGate(machine)
 
     def _default_bench(self, machine):
         from forge.tools.bench import RemoteBenchRunner  # noqa: PLC0415
@@ -703,6 +708,14 @@ class MissionRunner:
                     change = {"bundle": bid, **info["manifest"]}
         quick = [((b.get("result") or {}).get("delta_pct"), b["bench_id"]) for b in m.benches.values()
                  if (b.get("result") or {}).get("delta_pct") is not None]
+        reqs = list(self.services.gate_queue.reqs.values())
+        if not reqs:
+            gate_path = "no gate requested: no candidate was submitted for review"
+        elif not any(r.get("gate_id") for r in reqs):
+            gate_path = (f"{len(reqs)} gate request(s), none sent to the gate: "
+                         + ", ".join(sorted({r['status'] for r in reqs})))
+        else:
+            gate_path = f"{sum(1 for r in reqs if r.get('gate_id'))} of {len(reqs)} request(s) sent to the gate"
         return {
             "mission_id": m.id, "recipe_id": m.recipe_id, "machine": m.machine.get("name"),
             "gpu_class": m.gpu_class, "metric": m.metric, "baseline": baseline,
@@ -712,7 +725,7 @@ class MissionRunner:
             "done": {"status": a["status"], "met": a["met"], "criteria_sha256": m.done_hash,
                      "open_gates": a["open_gates"]},
             "quick_bench_best": max(quick) if quick else None, "n_benches": len(m.benches),
-            "n_gate_requests": len(self.services.gate_queue.reqs),
+            "n_gate_requests": len(self.services.gate_queue.reqs), "gate_path": gate_path,
             "cost_usd": round(self.meter.cost_usd, 4), "llm": self.meter.summary(),
             "playbook": self.playbook.get("hash"), "ended": self.end_reason, "errors": self.errors[:10],
             "detector": dict(self.detector.counts), "minutes": round((time.time() - m.t_start) / 60, 1),
