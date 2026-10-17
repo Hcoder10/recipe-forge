@@ -33,6 +33,7 @@ class Agent:
         self.context_msg = ""
         self.turns = 0
         self.steps = 0
+        self.infra_retry_at = 0.0
         self.last_ctx_refresh = -10**9
         self.ctx = ToolContext(runner.mission, runner.executor, role, name, runner.log, runner.services)
         self.fixed_tokens = est_tokens(self.prefix) + est_tokens(self.tools)
@@ -135,8 +136,16 @@ class Agent:
                    cost_usd=round(resp.cost_usd, 5), n_tool_calls=len(resp.tool_calls),
                    text=(resp.content or "")[:300])
         called = []
+        infra_blocked = False
         for tc in resp.tool_calls:
-            res = self.r.registry.dispatch(self.ctx, self.role, tc.name, tc.args, tc.parse_error)
+            if infra_blocked:
+                res = {"ok": False, "class": "agent_error", "error": "Call skipped after an infrastructure "
+                       "or tool failure in this batch; inspect the failure before continuing."}
+            else:
+                res = self.r.registry.dispatch(self.ctx, self.role, tc.name, tc.args, tc.parse_error)
+            if res.get("class") in ("env_blocked", "tool_bug"):
+                infra_blocked = True
+                self.infra_retry_at = time.time() + 60
             self.steps += 1
             called.append(tc.name)
             self.r.log("tool_call", agent=self.name, tool=tc.name, args=_short(tc.args), ok=res.get("ok"),
@@ -144,7 +153,7 @@ class Agent:
                        result=_short(res, 600))
             self.r.detector.observe(self.name, self.role, tc.name, tc.args, res)
             self.history.append({"role": "tool", "tool_call_id": tc.id, "content": render_result(res)})
-        return {"called": called, "text": resp.content}
+        return {"called": called, "text": resp.content, "infra_blocked": infra_blocked}
 
 
 def _short(obj, n: int = 300) -> str:

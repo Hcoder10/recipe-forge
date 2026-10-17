@@ -187,6 +187,9 @@ def load_tests(loader, suite, pattern):
     for module_name in ("test_units", "test_mission_mock"):
         with patch.dict(sys.modules, {"pytest": shim}):
             module = importlib.import_module(module_name)
+        # patch.dict restores the module table, including newly imported modules.
+        # Keep the loaded legacy module so later discovery does not import pytest again.
+        sys.modules[module_name] = module
         for name, fn in inspect.getmembers(module, inspect.isfunction):
             if not name.startswith("test_"):
                 continue

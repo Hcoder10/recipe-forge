@@ -15,6 +15,7 @@ from forge.tools.registry import EnvBlocked, Registry, Tool, ToolError
 
 LANES = ["config", "env", "runtime", "kernels", "drafter", "system"]
 LANES += ["arch", "ssm", "moe", "attention", "gemm/quant", "launch-overhead"]
+LANES += ["norm", "sampler", "acceptance"]
 W, L, V = "worker", "lead", "verifier"
 
 
@@ -83,6 +84,7 @@ def t_arch_profile(ctx, n_prompts=4, steps=64):
     if not 1 <= n_prompts <= 32 or not 2 <= steps <= 512:
         raise ToolError("n_prompts must be 1..32 and steps must be 2..512")
     out = ctx.services.bench.arch_profile(ctx.mission, n_prompts=n_prompts, steps=steps)
+    ctx.mission._sol_arch_profile = out
     fid = ctx.services.brain.add({
         "claim": "Architecture inspection completed; read the named model implementation before assigning lanes.",
         "lane": "arch", "status": "measured" if out.get("time_by_category_pct") is not None else "open",
@@ -110,8 +112,44 @@ def t_profile(ctx):
 
 
 def t_bench(ctx, config_delta=None, env=None, bundle=None, n_prompts=None, fresh_reference=False, label="",
-            claim="", predict_pct=None):
+            claim="", predict_pct=None, repeat_reason=""):
+    """Freeze candidates before measuring; share recent identical experiments across workers."""
     m = ctx.mission
+    if bundle and (config_delta or env):
+        raise ToolError("bundle cannot be combined with config_delta or env; freeze the complete candidate first")
+    if not bundle and (config_delta or env):
+        bundle = t_make_bundle(ctx, config_delta=config_delta, env=env, include_edits=False)["bundle"]
+        config_delta, env = None, None
+    key = canon({"bundle": bundle, "n_prompts": n_prompts})
+    repeat = fresh_reference or bool(repeat_reason.strip())
+    with m.experiment_lock:
+        previous = m.experiments.get(key)
+        if previous and not repeat and time.time() - previous["t"] < 600:
+            if "result" in previous:
+                return {**previous["result"], "duplicate": True,
+                        "note": "Reused this mission's recent identical experiment; for an independent "
+                                "measurement supply repeat_reason or fresh_reference=true."}
+            return {"status": "running", "duplicate": True,
+                    "note": "An identical experiment is running; do independent work and retrieve it later."}
+        entry = {"t": time.time()}
+        m.experiments[key] = entry
+    try:
+        result = _run_bench(ctx, config_delta, env, bundle, n_prompts, fresh_reference, label, claim, predict_pct,
+                            repeat_reason)
+    except BaseException:
+        with m.experiment_lock:
+            if m.experiments.get(key) is entry:
+                del m.experiments[key]
+        raise
+    with m.experiment_lock:
+        entry.update(t=time.time(), result=dict(result))
+    return result
+
+
+def _run_bench(ctx, config_delta, env, bundle, n_prompts, fresh_reference, label, claim, predict_pct,
+               repeat_reason):
+    m = ctx.mission
+    task = ctx.services.team.task_of(ctx.agent) if getattr(ctx.services, "team", None) else None
     bundle_dir = None
     if bundle:
         bundle_dir = m.bundle_dir(bundle)
@@ -124,6 +162,11 @@ def t_bench(ctx, config_delta=None, env=None, bundle=None, n_prompts=None, fresh
                                  label=label or ("ref" if not (delta or env or bundle) else "cand"))
     res = {"gpu": out.get("gpu", {}).get("name"), "metric": m.metric,
            "reference": _brief_measure(out.get("reference")), "reference_cached": out.get("reference_cached")}
+    if bundle:
+        res["bundle"] = bundle
+    for k in ("gpu", "reference_gpu"):
+        if isinstance(out.get(k), dict):
+            res[k + "_identity"] = {n: out[k][n] for n in ("uuid", "index", "name") if n in out[k]}
     if out.get("previous_reference_value") is not None:
         res["previous_reference_value"] = out["previous_reference_value"]
     if "candidate" in out:
@@ -135,6 +178,8 @@ def t_bench(ctx, config_delta=None, env=None, bundle=None, n_prompts=None, fresh
         if out.get("reference_fresh"):
             res["reference_fresh"] = _brief_measure(out["reference_fresh"])
     res["bench_id"] = m.record_bench(ctx.agent, {"config_delta": delta, "env": env, "bundle": bundle,
+                                                 "lane": task.get("lane") if task else None,
+                                                 "repeat_reason": repeat_reason[:300], "n_prompts": n_prompts,
                                                  "claim": claim[:300], "predict_pct": predict_pct,
                                                  "result": res, "wall_s": round(time.time() - t0, 1)})
     det = getattr(ctx.services, "detector", None)
@@ -538,6 +583,13 @@ def t_facts(ctx, lane=None, query=None, limit=30):
 
 
 def t_decide(ctx, decision, trigger_ids, evidence, plan=""):
+    from forge.agents.decisions import SYNONYMS
+    normalized = (decision or "").strip().lower().replace(" ", "_")
+    if SYNONYMS.get(normalized, normalized) == "stop":
+        blockers = ctx.services.team.stop_blockers()
+        if blockers:
+            raise ToolError("More than 25% of the time box remains with unfinished workers/lanes: "
+                            + ", ".join(blockers) + "; replan, complete or report blocked work first")
     return ctx.services.decisions.decide(ctx.agent, decision, trigger_ids, evidence, plan)
 
 
@@ -598,8 +650,13 @@ def t_py(ctx, code, timeout_s=300):
 
 
 def build_registry() -> Registry:
+    from forge.tools.recordbench import record_bench
     reg = Registry()
     add = reg.add
+    add(Tool("record_bench", "Measure the public recipe workload and save an operator-only headline report. "
+             "This is not a substitute for the gate.",
+             _obj({"bundle": S, "config_delta": O, "env": O, "reps": I}),
+             record_bench, (L, V), order=4, light=False, returns="record receipt; measurements stay operator-only."))
     add(Tool("arch_profile", "Inspect reference model structure and collect a sandboxed decode trace.",
              _obj({"n_prompts": I, "steps": I}), t_arch_profile, (W,), order=3, light=False,
              returns="structure, category timings, idle fraction, launches, kernel counts and model files."))
@@ -609,9 +666,11 @@ def build_registry() -> Registry:
     add(Tool("bench", "Quick bench on the visible prompts. With no change it measures the reference. With "
              "config_delta (serve flags to set; null removes a flag), env, or bundle it measures that "
              "candidate and its delta_pct against the reference on the same GPU (the reference is cached per "
-             "GPU + recipe + prompt set).",
+             "GPU + recipe + prompt set). Config/env candidates are frozen automatically; use the returned "
+             "bundle and bench_id for request_gate. Recent identical experiments are reused unless "
+             "repeat_reason is supplied or fresh_reference is true.",
              _obj({"config_delta": O, "env": O, "bundle": S, "n_prompts": I, "fresh_reference": B, "label": S,
-                   "claim": S, "predict_pct": {"type": "number"}}),
+                   "claim": S, "predict_pct": {"type": "number"}, "repeat_reason": S}),
              t_bench, (W, V), order=2, light=False, returns="reference, candidate, delta_pct, bench_id."))
     add(Tool("read", "Read a file: a venv file by package path (e.g. vllm/...; shows your edited copy if any), "
              "a workspace file, or a model-dir file; directories return a listing.", _obj({"path": S, "start": I, "lines": I}, ["path"]),
@@ -679,4 +738,6 @@ def build_registry() -> Registry:
              _obj({"cmd": S, "timeout_s": I}, ["cmd"]), t_sh, (W,), order=90))
     add(Tool("py", "Run Python code with the recipe's venv (sandboxed, no GPU).",
              _obj({"code": S, "timeout_s": I}, ["code"]), t_py, (W,), order=91))
+    from forge.tools.sol import register as register_sol
+    register_sol(reg)
     return reg

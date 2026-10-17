@@ -92,6 +92,10 @@ def paired_test(gains: list[float], null_gains: list[float], alpha: float) -> di
     allpos = all(g > 0 for g in gains)
     win = allpos and mean > thr
     why = "win" if win else ("a pair was not positive" if not allpos else "mean gain below threshold")
+    radius = t_ppf(1 - alpha / 2, df) * s / math.sqrt(n)
+    ci = {"confidence": 1 - alpha, "lower_log_gain": mean - radius,
+          "upper_log_gain": mean + radius, "df_null": df,
+          "method": "two-sided Student t, reference RMS"}
     return {"n": n, "mean_log_gain": mean, "s_null": s, "df_null": df, "alpha": alpha, "threshold": thr,
-            "all_positive": allpos, "win": win, "why": why,
+            "all_positive": allpos, "win": win, "why": why, "ci": ci,
             "gain_pct": (math.exp(mean) - 1) * 100, "threshold_pct": (math.exp(thr) - 1) * 100}

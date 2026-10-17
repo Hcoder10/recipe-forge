@@ -68,7 +68,7 @@ def _write_row(row: dict) -> dict:
 
 PUBLIC = ("gate_id", "mission_id", "recipe_id", "recipe_key", "machine", "bundle_hash", "kind", "status",
           "verdict", "delta_pct", "evidence_id", "confirmed", "detail", "parent", "requester", "claim",
-          "gain_pct", "threshold_pct", "lossless_pass", "pairs", "confirm_gate")
+          "gain_pct", "threshold_pct", "lossless_pass", "pairs", "confirm_gate", "priority")
 
 
 def append(req: dict, **fields) -> dict:
@@ -125,7 +125,7 @@ def submit(kind: str, recipe_id: str, bundle_dir: str | None = None, bundle_hash
            mission_id: str | None = None, machine: str | None = None, requester: str | None = None,
            claim: str | None = None, recipe: dict | None = None, python: str | None = None,
            reps: int | None = None, parent: str | None = None, confirm_index: int = 0,
-           lock: str | None = None, gpu_uuid: str | None = None) -> dict:
+           lock: str | None = None, gpu_uuid: str | None = None, priority: str = "normal") -> dict:
     recipe, key, workload = resolve(recipe_id, recipe)
     if kind != "reference":
         if not bundle_dir or not os.path.isdir(bundle_dir):
@@ -151,7 +151,7 @@ def submit(kind: str, recipe_id: str, bundle_dir: str | None = None, bundle_hash
                "mission_id": mission_id, "machine": machine, "requester": requester, "claim": (claim or "")[:2000],
                "python": python, "reps": reps or REF_REPS, "parent": parent, "confirm_index": confirm_index,
                "lock": lock or os.environ.get("FORGE_GATE_LOCK", "main"), "history_key": history_key,
-               "submitted": time.time()}
+               "submitted": time.time(), "priority": priority}
         _save_request(req)
         row = _write_row({**{k: req.get(k) for k in PUBLIC if k in req}, "status": "queued", "verdict": None,
                           "evidence_id": gid, "confirmed": False})
@@ -170,10 +170,33 @@ def _n_null(history_key: str) -> int:
 def next_request() -> dict | None:
     """Pick the next queued request, queueing reference controls a recipe still needs."""
     cur = latest()
+    if any(r.get("status") == "running" for r in cur.values()):
+        return None  # A priority request never preempts an active gate.
     queued = [r for r in cur.values() if r.get("status") == "queued"]
     if not queued:
         return None
     reqs = {r["gate_id"]: get_request(r["gate_id"]) for r in queued}
+    high = sorted((r for r in reqs.values() if r["kind"] == "candidate" and r.get("priority") == "high"),
+                  key=lambda r: r["submitted"])
+    if high:
+        candidate = high[0]
+        hk = candidate["history_key"]
+        missing = max(0, MIN_NULL_PAIRS - _n_null(hk))
+        if not missing:
+            return candidate
+        controls = sorted((r for r in reqs.values() if r["kind"] == "reference" and r["history_key"] == hk),
+                          key=lambda r: r["submitted"])
+        if controls:
+            ref = dict(controls[0])
+            ref["reps"] = min(int(ref.get("reps") or REF_REPS), missing)
+        else:
+            row = submit("reference", candidate["recipe_id"], recipe=candidate["recipe"],
+                         python=candidate["python"], machine=candidate.get("machine"),
+                         requester="gate/setup", reps=min(REF_REPS, missing), lock=candidate.get("lock"))
+            ref = get_request(row["gate_id"])
+            ref["history_key"] = hk
+        _save_request(ref)
+        return ref
     pending_refs: dict[str, int] = {}
     for r in cur.values():
         if r.get("kind") == "reference" and r.get("status") in ("queued", "running"):
@@ -212,6 +235,7 @@ def finish(req: dict, v: dict) -> dict:
                  delta_pct=v.get("delta_pct"), detail=v.get("detail"), gain_pct=test.get("gain_pct"),
                  threshold_pct=test.get("threshold_pct"), lossless_pass=(v.get("lossless") or {}).get("pass"),
                  pairs=[round(p["log_gain"], 5) for p in v.get("pairs", [])], evidence_id=req["gate_id"],
+                 ci=test.get("ci"), lossless=v.get("lossless"),
                  minutes=v.get("minutes"))
     if req["kind"] == "candidate" and v.get("verdict") == "win":
         n_conf = sum(1 for r in latest().values() if r.get("kind") == "confirm")

@@ -60,6 +60,8 @@ class MissionState:
     _pkgs: set | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _bench_ids: itertools.count = field(default_factory=lambda: itertools.count(1))
+    experiments: dict = field(default_factory=dict)
+    experiment_lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def recipe_id(self) -> str:
@@ -133,6 +135,19 @@ class GateQueue:
     def bar_text(self) -> str:
         return f"quick-bench delta_pct >= {self.bar}% on a bench of this exact bundle"
 
+    @staticmethod
+    def fasttrack(result: dict) -> bool:
+        import math
+        import os
+        try:
+            threshold = float(os.environ.get("FORGE_FASTTRACK_PCT", "8"))
+            delta = float(result.get("delta_pct"))
+            return (result.get("confirmed") is True and result.get("verdict_hint") == "gain"
+                    and math.isfinite(threshold) and threshold >= 0 and math.isfinite(delta)
+                    and delta >= threshold)
+        except (TypeError, ValueError):
+            return False
+
     def submit(self, ctx, bundle: str, claim: str, bench_id: str) -> dict:
         m = self.r.mission
         info = m.bundles.get(bundle)
@@ -154,9 +169,14 @@ class GateQueue:
             rid = f"R{next(self.ids)}"
             req = {"id": rid, "bundle": bundle, "hash": info["hash"], "claim": claim[:500], "bench_id": bench_id,
                    "delta_pct": delta, "by": ctx.agent, "status": "pending_review", "manifest": info["manifest"]}
+            if self.fasttrack(b.get("result") or {}):
+                req["priority"] = "high"
             self.reqs[rid] = req
         events.append(self.path, {"event": "submit", **req})
         self.r.log("gate_request", request_id=rid, bundle=bundle, delta_pct=delta, by=ctx.agent, claim=claim[:300])
+        if req.get("priority") == "high":
+            self.r.log("gate_fasttrack", request_id=rid, bench_id=bench_id)
+            return self.review(ctx, rid, True, "Automatically approved by gate policy")
         self.r.wake("verifier")
         return {"request_id": rid, "status": "pending_review", "bar": self.bar_text()}
 
@@ -194,9 +214,34 @@ class GateQueue:
             return {"request_id": request_id, "status": "rejected"}
         m = self.r.mission
         try:
-            g = self.r.services.gate.request(recipe_id=m.recipe_id, bundle_dir=m.bundle_dir(req["bundle"]),
+            gate = self.r.services.gate
+            request = gate.request
+            kwargs = {}
+            if req.get("priority") == "high":
+                from forge.tools.gateclient import CoreGate
+                from forge.fleet.remotegate import RemoteGate
+                kwargs["priority"] = "high"
+                if isinstance(gate, CoreGate):
+                    # The legacy adapter has no priority argument; use its local core ledger.
+                    from forge.gate.records import submit
+                    request = lambda **kw: submit("candidate", **kw)
+                    kwargs["machine"] = gate.machine.get("name")
+                elif isinstance(gate, RemoteGate):
+                    def request(**kw):
+                        root = gate.machine.get("forge_root", "/root/forge")
+                        py = gate.machine.get("sched_python") or gate.machine.get("python") or "python3"
+                        prog = ("import json,sys; from forge.gate.records import submit; "
+                                "print('GATE_RPC '+json.dumps(submit('candidate', **json.loads(sys.argv[1]))))")
+                        result = gate.ex.run([py, "-c", prog, json.dumps(kw)], cwd=root,
+                                             env={"PYTHONPATH": root, "FORGE_ROOT": root}, timeout_s=120)
+                        if result.infra_error or result.rc:
+                            raise RuntimeError("priority gate submission unavailable")
+                        line = next(l for l in result.stdout.splitlines() if l.startswith("GATE_RPC "))
+                        return json.loads(line[len("GATE_RPC "):])
+                    kwargs["machine"] = gate.machine.get("name")
+            g = request(recipe_id=m.recipe_id, bundle_dir=m.bundle_dir(req["bundle"]),
                                              bundle_hash=req["hash"], mission_id=m.id, requester=req["by"],
-                                             claim=req["claim"])
+                                             claim=req["claim"], **kwargs)
         except Exception as e:  # the gate service failing is infra
             with self.lock:
                 req["status"] = "gate_error"
@@ -244,12 +289,14 @@ class Team:
         self.tasks: dict[str, dict | None] = {w: None for w in runner.mission.worker_names}
         self.lock = threading.Lock()
         self.reports: list[dict] = []
+        self.assigned_lanes: set[str] = set()
 
     def assign(self, by: str, worker: str, task: str, lane: str) -> dict:
         if worker not in self.tasks:
             raise ToolError(f"no worker {worker!r}; workers: {', '.join(self.tasks)}")
         with self.lock:
             self.tasks[worker] = {"task": task[:1500], "lane": lane, "since": time.time()}
+            self.assigned_lanes.add(lane)
         self.r.log("worker_task", worker=worker, lane=lane, task=task[:500], by=by)
         self.r.agents[worker].add_event_message(f"TASK from the lead (lane {lane}): {task}")
         self.r.wake(worker)
@@ -268,6 +315,22 @@ class Team:
     def task_of(self, worker: str) -> dict | None:
         with self.lock:
             return self.tasks.get(worker)
+
+    def stop_blockers(self) -> list[str]:
+        """Do not abandon unfinished lanes early; operator stop is independent."""
+        m = self.r.mission
+        if m.minutes_left() <= m.time_box_min * 0.25:
+            return []
+        if done_mod.audit(m.criteria, self.r.services.gate.ledger(mission_id=m.id))["met"]:
+            return []
+        with self.lock:
+            active = [w for w, task in self.tasks.items() if task is not None]
+            measured = {b.get("lane") for b in m.benches.values()
+                        if (b.get("result") or {}).get("candidate")}
+            blocked = {r["task"]["lane"] for r in self.reports
+                       if r.get("task") and r["status"] in ("blocked", "failed")}
+            untested = self.assigned_lanes - measured - blocked - {"arch"}
+        return active + sorted(untested)
 
     def status(self) -> dict:
         m = self.r.mission
@@ -573,7 +636,14 @@ class MissionRunner:
                 continue
             if not self._wait_unpaused():
                 return
+            retry_at = getattr(w, "infra_retry_at", 0)
+            if isinstance(retry_at, (int, float)) and retry_at > time.time():
+                self.finished.wait(min(1, retry_at - time.time()))
+                continue
             out = w.step(self._status(w))
+            if out.get("infra_blocked") and self.services.team.task_of(name) is not None:
+                self.services.team.report(name, "Infrastructure/tool failure reported automatically; "
+                                          "reassign after repair or to independent work.", "blocked")
             if out["called"]:
                 idle_replies = 0
             else:
