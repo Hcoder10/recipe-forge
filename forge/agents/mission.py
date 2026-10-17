@@ -53,6 +53,8 @@ class MissionState:
     benches: dict = field(default_factory=dict)
     bundles: dict = field(default_factory=dict)
     bench_log: Path | None = None
+    serve_cwd: str | None = None
+    hf_home: str | None = None
     _pkgs: set | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _bench_ids: itertools.count = field(default_factory=lambda: itertools.count(1))
@@ -336,6 +338,14 @@ class MissionRunner:
             n_workers=int(self.team_cfg.workers), criteria=criteria, done_hash=done_hash,
             executor=self.executor, readable_roots=list(spec.get("readable_roots") or []),
             bench_log=self.dir / "benches.jsonl")
+        m = self.mission
+        m.hf_home = spec.get("hf_home") or (machine.get("env") or {}).get("HF_HOME")
+        if not m.bench_prompts.startswith("/") and machine.get("forge_root"):
+            m.bench_prompts = posixpath.join(machine["forge_root"], m.bench_prompts)
+        snap = spec.get("model_dir") or _snapshot_dir(self.executor, python, recipe["model"], m.hf_home)
+        m.serve_cwd = spec.get("serve_cwd") or machine.get("extra_files_dir") or snap
+        if snap:
+            m.readable_roots.append(snap)
         self.meter = Meter(self.dir / "usage.jsonl", self.mission.budget_usd)
         self.mission.meter = self.meter
         prof = get_profile(spec.get("profile", "crusoe"))
@@ -619,6 +629,18 @@ def normalize_recipe(recipe: dict, variant: str | None = None, bench_prompts: st
     wl.setdefault("metric", "decode_tok_s" if int(wl.get("concurrency", 1)) <= 1 else "output_tok_s")
     r["workload"] = wl
     return r
+
+
+def _snapshot_dir(executor, python: str, model: str, hf_home: str | None) -> str | None:
+    code = ("from huggingface_hub import snapshot_download as s;"
+            f"print(s({model!r}, local_files_only=True))")
+    env = {"HF_HUB_OFFLINE": "1", **({"HF_HOME": hf_home} if hf_home else {})}
+    try:
+        r = executor.run([python, "-c", code], env=env, timeout_s=60)
+    except Exception:  # noqa: BLE001
+        return None
+    out = r.stdout.strip().splitlines()
+    return out[-1] if r.rc == 0 and out and out[-1].startswith("/") else None
 
 
 def _site_packages(executor, python: str) -> str:

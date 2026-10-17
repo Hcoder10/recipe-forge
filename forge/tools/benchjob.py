@@ -56,11 +56,11 @@ def load_prompts(path: str, n: int | None) -> list[dict]:
     return rows[:n] if n else rows
 
 
-def wait_ready(port: int, proc: subprocess.Popen, timeout_s: float, log_path: Path) -> None:
+def wait_ready(port: int, proc, timeout_s: float, log_path: Path) -> None:
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         if proc.poll() is not None:
-            raise RuntimeError(f"server exited with code {proc.returncode} during startup; "
+            raise RuntimeError(f"server exited with code {proc.poll()} during startup; "
                                f"log tail: {tail(log_path, 6)}")
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
@@ -167,34 +167,91 @@ def run_workload(port: int, model: str, prompts: list[dict], wl: dict) -> dict:
     return out
 
 
+class _Plain:
+    """Unsandboxed server process (only when the spec says sandbox: false)."""
+
+    def __init__(self, argv, env, cwd, log_path):
+        self.log_path = log_path
+        with open(log_path, "w") as log:
+            self.proc = subprocess.Popen(argv, env={**os.environ, **env}, stdout=log, stderr=subprocess.STDOUT,
+                                         start_new_session=True, cwd=cwd or None)
+
+    def poll(self):
+        return self.proc.poll()
+
+    def stop(self):
+        try:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+            self.proc.wait(timeout=60)
+        except Exception:
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+
+class _Sandboxed:
+    """Server inside forge.sandbox (Landlock + its own systemd scope); candidates carry agent code."""
+
+    def __init__(self, argv, env, cwd, spec, label, work: Path, ro_extra: list[str], port_range):
+        from forge.sandbox import Spec as SbxSpec, launch  # noqa: PLC0415
+        venv = str(Path(spec["python"]).parent.parent)
+        cache = Path(spec["work_dir"]).parent.parent / "benchcache"
+        cache.mkdir(parents=True, exist_ok=True)
+        ro = [venv] + [p for p in [spec.get("hf_home"), cwd, *ro_extra] if p]
+        gpu = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
+        job_dir = work / f"sbx-{label}"
+        home = job_dir / "home"
+        senv = {k: v for k, v in env.items() if k not in ("PATH", "HOME", "CUDA_VISIBLE_DEVICES")}
+        senv.update({"VLLM_CACHE_ROOT": str(cache / "vllm"), "HF_MODULES_CACHE": str(home / "hf_modules"),
+                     "HF_HUB_OFFLINE": "1"})
+        if spec.get("hf_home"):
+            senv["HF_HOME"] = spec["hf_home"]
+        for k in ("LANDLORD_LEASE_ID", "FORGE_LEASE_IDS", "FORGE_GRANT_ID"):
+            if os.environ.get(k):
+                senv[k] = os.environ[k]
+        self.job = launch(SbxSpec(cmd=argv, job_dir=str(job_dir), ro=ro, rw=[str(cache)], gpus=[gpu],
+                                  ports=port_range, env=senv, path_prepend=[f"{venv}/bin"], cwd=cwd or None,
+                                  name=f"bench-{label}-{os.getpid()}"))
+        self.log_path = Path(self.job.log_path)
+
+    def poll(self):
+        return self.job.poll()
+
+    def stop(self):
+        try:
+            self.job.stop()
+        finally:
+            self.job.cleanup(keep_log=True)
+
+
 def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: str, work: Path) -> dict:
     rec = spec["recipe"]
-    port = free_port()
+    lo, hi = os.environ.get("FORGE_PORT_LO"), os.environ.get("FORGE_PORT_HI")
+    port = int(lo) if lo else free_port()
+    hook = work / f"hook-{label}"
     argv, extra_env = serve_command(spec["python"], rec["model"], rec["serve_args"], bundle_dir, port,
-                                    config_delta, env_delta, hook_dir=work / f"hook-{label}")
-    env = {**os.environ, **(rec.get("env") or {}), **extra_env}
-    env.setdefault("VLLM_CACHE_ROOT", str(work / f"cache-{label}"))
-    log_path = work / f"server-{label}.log"
+                                    config_delta, env_delta, hook_dir=hook)
+    env = {**(rec.get("env") or {}), **extra_env}
     t0 = time.time()
-    with open(log_path, "w") as log:
-        proc = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                                cwd=spec.get("serve_cwd") or None)
+    if spec.get("sandbox", True):
+        ro_extra = [str(hook)] if hook.exists() else []
+        if bundle_dir:
+            ro_extra.append(str(bundle_dir))
+        srv = _Sandboxed(argv, env, spec.get("serve_cwd"), spec, label, work, ro_extra,
+                         (int(lo), int(hi)) if lo and hi else (port, port))
+    else:
+        env.setdefault("VLLM_CACHE_ROOT", str(work / f"cache-{label}"))
+        srv = _Plain(argv, env, spec.get("serve_cwd"), work / f"server-{label}.log")
     try:
-        wait_ready(port, proc, float(spec.get("startup_timeout_s", 900)), log_path)
+        wait_ready(port, srv, float(spec.get("startup_timeout_s", 900)), srv.log_path)
         startup = time.time() - t0
         prompts = load_prompts(spec["prompts"], spec.get("n_prompts"))
         res = run_workload(port, rec.get("served_model_name") or rec["model"], prompts, spec["workload"])
         res["startup_s"] = round(startup, 1)
         return res
     finally:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=60)
-        except Exception:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                pass
+        srv.stop()
 
 
 def main() -> None:
@@ -209,7 +266,8 @@ def main() -> None:
     try:
         prompts_hash = hashlib.sha256(Path(spec["prompts"]).read_bytes()).hexdigest()[:16]
         key = hashlib.sha256(canon({"gpu": gpu["uuid"], "recipe": spec["recipe"], "prompts": prompts_hash,
-                                    "n": spec.get("n_prompts"), "wl": spec["workload"]}).encode()).hexdigest()[:20]
+                                    "n": spec.get("n_prompts"), "wl": spec["workload"],
+                                    "sandbox": spec.get("sandbox", True)}).encode()).hexdigest()[:20]
         cache = Path(spec["ref_cache_dir"]) / f"{key}.json"
         out["ref_key"] = key
         if cache.exists() and not spec.get("fresh_reference"):

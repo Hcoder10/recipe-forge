@@ -14,8 +14,9 @@ from forge.tools.registry import EnvBlocked, ToolError
 
 class RemoteBenchRunner:
     def __init__(self, executor, forge_root: str, python: str, vram_gb: float = 90.0,
-                 timeout_s: float = 2400):
+                 timeout_s: float = 2400, sandbox: bool = True):
         self.ex = executor
+        self.sandbox = sandbox
         self.forge_root = forge_root
         self.python = python
         self.vram_gb = vram_gb
@@ -34,6 +35,8 @@ class RemoteBenchRunner:
             "workload": rec["workload"], "prompts": mission.bench_prompts, "n_prompts": n_prompts,
             "ref_cache_dir": str(PurePosixPath(self.forge_root) / "state" / "refcache"),
             "work_dir": work, "fresh_reference": fresh_reference,
+            "serve_cwd": getattr(mission, "serve_cwd", None), "sandbox": self.sandbox,
+            "hf_home": getattr(mission, "hf_home", None),
             "candidate": None if (config_delta is None and bundle_dir is None and env is None)
             else {"config_delta": config_delta, "env": env, "bundle_dir": bundle_dir},
         }
