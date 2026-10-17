@@ -220,6 +220,8 @@ class Controller:
             key = (r.get("recipe_id"), r.get("gpu_class") or r.get("machine"))
             cur = best.get(key)
             won = (r.get("done") or {}).get("status") == "win"
+            if not won and r.get("baseline") is None:
+                continue      # the mission never measured the reference (aborted / infra): no row to show
             score = (r.get("delta_pct") or 0) if won else -1e9
             entry = {"recipe_id": key[0], "gpu_class": key[1], "machine": r.get("machine"),
                      "metric": r.get("metric"), "baseline": r.get("baseline"),
