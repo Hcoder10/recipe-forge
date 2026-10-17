@@ -200,22 +200,26 @@ class FleetExecutor:
         d = self._job_dir(job_id)
         body = self._script(cmd, cwd, env, None)
         run_sh = f"{body}\n"
-        wrapper = (f"#!/bin/bash\n( {run_sh} )\necho $? > {shlex.quote(d)}/rc.tmp && mv {shlex.quote(d)}/rc.tmp {shlex.quote(d)}/rc\n")
+        qd = shlex.quote(d)
+        # run.sh records its own pid: under setsid it leads its own process group (stop_job kills the group)
+        wrapper = (f"#!/bin/bash\necho $$ > {qd}/pid\n( {run_sh} )\necho $? > {qd}/rc.tmp && mv {qd}/rc.tmp {qd}/rc\n")
         self.write_bytes(posixpath.join(d, "run.sh"), wrapper.encode(), mode="755")
-        r = self.sh(f"cd {shlex.quote(d)} && rm -f rc && setsid nohup bash run.sh > log 2>&1 < /dev/null & "
-                    f"echo $! > {shlex.quote(d)}/pid; cat {shlex.quote(d)}/pid")
+        # the background launch must not inherit the transport's stdout/stderr, or ssh waits for the job to end
+        r = self.sh(f"cd {qd} || exit 1; rm -f rc pid; setsid -f nohup bash run.sh > log 2>&1 < /dev/null; "
+                    f"for i in $(seq 50); do [ -s pid ] && break; sleep 0.1; done; cat pid", timeout_s=60)
         if r.rc != 0:
             raise ExecutorError(f"start_job {job_id} on {self.name}: {r.stderr.strip()[-200:]}")
         return job_id
 
     def job_status(self, job_id: str) -> dict:
         d = shlex.quote(self._job_dir(job_id))
-        r = self.sh(f"cat {d}/pid 2>/dev/null; echo; cat {d}/rc 2>/dev/null; echo; "
-                    f"p=$(cat {d}/pid 2>/dev/null); [ -n \"$p\" ] && kill -0 $p 2>/dev/null && echo alive")
-        parts = r.stdout.split("\n")
-        pid = int(parts[0]) if parts and parts[0].strip().isdigit() else None
-        rc = int(parts[1]) if len(parts) > 1 and parts[1].strip().lstrip("-").isdigit() else None
-        alive = "alive" in r.stdout
+        r = self.sh(f"echo PID=$(cat {d}/pid 2>/dev/null); echo RC=$(cat {d}/rc 2>/dev/null); "
+                    f"p=$(cat {d}/pid 2>/dev/null); [ -n \"$p\" ] && kill -0 $p 2>/dev/null && echo ALIVE=1; true")
+        kv = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        pid = int(kv["PID"]) if kv.get("PID", "").strip().isdigit() else None
+        rcs = kv.get("RC", "").strip()
+        rc = int(rcs) if rcs.lstrip("-").isdigit() else None
+        alive = kv.get("ALIVE") == "1"
         state = "exited" if rc is not None else ("running" if alive else ("lost" if pid else "unknown"))
         return {"job_id": job_id, "state": state, "rc": rc, "pid": pid}
 
