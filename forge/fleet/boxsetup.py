@@ -108,7 +108,9 @@ def main(argv=None) -> int:
 
     def deps():
         out = sh("python3 -c 'import yaml, huggingface_hub, vllm; print(vllm.__version__)'")
-        return {"vllm": out.strip().splitlines()[-1]}
+        import ctypes
+        abi = ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1)   # landlock_create_ruleset(VERSION)
+        return {"vllm": out.strip().splitlines()[-1], "kernel": os.uname().release, "landlock_abi": int(abi)}
 
     step(st, "deps", deps)
 

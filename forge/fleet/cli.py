@@ -204,6 +204,10 @@ def boxes(provision: bool, log=print) -> list[dict]:
                         and not st.get("ready"):
                     pub = pub or prov.rig_pubkey()
                     st = prov.provision(m, pub, log=log)
+                deps = (st.get("steps") or {}).get("deps") or {}
+                if "landlock_abi" in deps and m.get("landlock_abi") != deps["landlock_abi"]:
+                    m["landlock_abi"], m["kernel"] = deps["landlock_abi"], deps.get("kernel")
+                    save_machine(m)
                 if st.get("ready") and not m.get("ready"):
                     m["ready"] = True
                     m["status"] = "ready"

@@ -105,6 +105,9 @@ class Controller:
     def machine_ready(self, m: dict) -> bool:
         if m.get("kind") != "vast":
             return True
+        min_abi = int(os.environ.get("FORGE_MIN_LANDLOCK_ABI", "6"))
+        if m.get("landlock_abi") is not None and m["landlock_abi"] < min_abi:
+            return False      # core's sandbox cannot start there
         return bool(m.get("ready"))
 
     def dispatch(self) -> list[str]:
