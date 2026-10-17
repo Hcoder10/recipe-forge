@@ -108,9 +108,15 @@ def compare_data(root, mid=None):
             result = mapping(row.get("result"))
             ref = number(mapping(result.get("reference")).get("decode_tok_s"))
             cand = number(mapping(result.get("candidate")).get("decode_tok_s"))
+            fresh = number(mapping(result.get("reference_fresh")).get("decode_tok_s"))
+            delta = number(result.get("delta_pct"))
             if ref is not None and ref > 0 and cand is not None and cand >= 0:
-                if best is None or cand > best["candidate"]:
-                    best = {"reference": ref, "candidate": cand, "delta": (cand / ref - 1) * 100}
+                if delta is None:
+                    delta = (cand / ref - 1) * 100
+                if best is None or delta > best["delta"]:
+                    # show the reference the bench's delta was computed against (fresh when re-measured)
+                    shown = cand / (1 + delta / 100) if delta > -100 else (fresh or ref)
+                    best = {"reference": shown, "candidate": cand, "delta": delta}
         results = [r for r in gates if r.get("mission_id") == mission and r.get("verdict")]
         measured = [r for r in results if verified(r)]
         gate = max(measured, key=lambda r: number(r.get("delta_pct")),
@@ -438,8 +444,11 @@ def fleet_data(root, snapshot, now=None):
             result = mapping(bench.get('result'))
             ref = number(mapping(result.get('reference')).get('decode_tok_s'))
             cand = number(mapping(result.get('candidate')).get('decode_tok_s'))
-            if ref is not None and ref > 0 and cand is not None and cand >= 0:
+            # the bench's own delta_pct already uses the fresh reference when it re-measured one
+            delta = number(result.get('delta_pct'))
+            if delta is None and ref is not None and ref > 0 and cand is not None and cand >= 0:
                 delta = (cand / ref - 1) * 100
+            if delta is not None:
                 if best is None or delta > best['delta']:
                     best = {'delta': delta, 'hint': result.get('verdict_hint') or bench.get('verdict_hint') or 'quick'}
         ended = next((e for e in reversed(events) if e.get('kind') == 'mission_end'), None)
