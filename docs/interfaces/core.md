@@ -103,9 +103,12 @@ How a run works (for the dash and the auditor; agent-visible text should not rep
 - Caches: reference servers share a warm, fixed-path cache per recipe (`gate/cache/ref/<key>`); candidate
   servers get `gate/cache/cand`, wiped at the start of each gate. Servers get the venv's CUDA toolkit
   (`site-packages/nvidia/cu*/`) as CUDA_HOME, since cold caches JIT-compile kernels.
-- Timing: `/v1/completions` with chat-templated token ids, temperature 0, `logprobs=1`; per-request end-to-end
-  time; tokens = gate re-tokenized count, must match the server's returned token list within 1%
-  (`usage.completion_tokens` is not used: it reads 2x under speculative decoding in this vLLM build).
+- Warmup: one prompt per stratum (every prompt-length class) before timing, so lazy kernel tuning never
+  lands in the timed pass.
+- Timing: `/v1/completions` with chat-templated token ids (`apply_chat_template` returns a BatchEncoding:
+  take `["input_ids"]`), temperature 0, `logprobs=1`, fixed-length outputs (`ignore_eos`, recipe workload
+  `gate_ignore_eos: false` turns it off); per-request end-to-end time; tokens = gate re-tokenized count,
+  must match the server's returned token list within 1%.
 - Locks: `python -m forge.gate.lock write --name main|rehearsal`; a request runs under `FORGE_GATE_LOCK`
   (default `main`) and is `invalid` if that lock does not verify. The lock covers forge/gate, forge/sandbox,
   forge/sched and forge/tools/bundle.py.

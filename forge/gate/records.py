@@ -100,7 +100,8 @@ def resolve(recipe_id: str, recipe: dict | None = None) -> tuple[dict, str, dict
     conc = int(wl.get("concurrency") or 1)
     workload = {"concurrency": conc, "max_tokens": int(wl.get("max_tokens") or 512),
                 "metric": wl.get("metric") or ("decode_tok_s" if conc == 1 else "output_tok_s"),
-                "prompts_per_rep": int(wl.get("gate_prompts_per_rep") or (8 if conc == 1 else 2 * conc))}
+                "prompts_per_rep": int(wl.get("gate_prompts_per_rep") or (8 if conc == 1 else 2 * conc)),
+                "ignore_eos": bool(wl.get("gate_ignore_eos", True))}
     key = f"{recipe.get('id', rid)}:{variant}" if variant else recipe.get("id", rid)
     return recipe, key, workload
 

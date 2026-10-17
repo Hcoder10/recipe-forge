@@ -124,8 +124,8 @@ def build(root: str, per_stratum: int = 12, exclude_texts: list[str] | None = No
 
 
 class Slices:
-    """Fixed, disjoint regions of the pool. Per stratum the items are split into:
-    index 0..1 -> warmup, 2..3 -> probes, then rep slices, then confirm slices."""
+    """Fixed, disjoint regions of the pool. Per stratum: index 0 -> warmup, 1 -> probes (non-short strata),
+    then rep slices, then confirm slices."""
 
     def __init__(self, pool: dict, max_reps: int = 8):
         self.by_stratum: dict[str, list[dict]] = {}
@@ -144,7 +144,8 @@ class Slices:
         return out
 
     def warmup(self) -> list[dict]:
-        return self._take(0, 1, short_only=True)
+        """One prompt per stratum, so every prompt-length class is compiled/tuned before timing."""
+        return self._take(0, 1)
 
     def probes(self) -> list[dict]:
         return [it for it in self._take(1, 1) if not it["stratum"].endswith("/short")]

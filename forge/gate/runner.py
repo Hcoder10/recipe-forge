@@ -26,6 +26,7 @@ MIN_NULL_PAIRS = 8
 TOKEN_TOL = 0.01
 PROBE_TOPK = 5
 QUIET_RETRIES = 6
+WARMUP_TOKENS = 128
 QUIET_WAIT_S = 10
 
 
@@ -35,6 +36,7 @@ class Workload:
     max_tokens: int = 512
     metric: str = "decode_tok_s"
     prompts_per_rep: int = 8
+    ignore_eos: bool = True      # every timed request does the same work on both sides of a pair
 
 
 class GateInvalid(Exception):
@@ -63,7 +65,7 @@ def timed_pass(server, model: str, prompts: list[list[int]], wl: Workload, retok
             if i is None:
                 return
             try:
-                r, dt = server.complete(model, prompts[i], wl.max_tokens, logprobs=1)
+                r, dt = server.complete(model, prompts[i], wl.max_tokens, logprobs=1, ignore_eos=wl.ignore_eos)
             except Exception as e:  # recorded; the pass becomes invalid
                 errors.append(f"{type(e).__name__}: {str(e)[:200]}")
                 return
@@ -177,7 +179,7 @@ def run(kind: str, slices, wl: Workload, reps: int, ctx: RunCtx, confirm_index: 
                 meta["startup_s"] = srv.start()
                 model = srv.model_name()
                 for w in warm:
-                    srv.complete(model, w, min(64, wl.max_tokens))
+                    srv.complete(model, w, min(WARMUP_TOKENS, wl.max_tokens))
                 if ctx.watch:
                     with ctx.watch(srv) as wt:
                         res = timed_pass(srv, model, ids, wl, ctx.retok)

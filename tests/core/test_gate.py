@@ -44,7 +44,7 @@ class FakeServer:
     def _shift(self, prev):
         return 2.5 if self.lossy and prev % 3 == 0 else 0.0
 
-    def complete(self, model, prompt_ids, max_tokens, logprobs=None, prompt_logprobs=None, timeout=0):
+    def complete(self, model, prompt_ids, max_tokens, logprobs=None, prompt_logprobs=None, timeout=0, ignore_eos=False):
         if prompt_logprobs:
             plp = [None] + [{str(k): {"logprob": v} for k, v in _dist(prompt_ids[i - 1], self._shift(prompt_ids[i - 1])).items()}
                             for i in range(1, len(prompt_ids))]

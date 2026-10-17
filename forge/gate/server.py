@@ -95,9 +95,12 @@ class GateServer:
         return d["data"][0]["id"]
 
     def complete(self, model: str, prompt_ids: list[int], max_tokens: int, logprobs: int | None = None,
-                 prompt_logprobs: int | None = None, timeout: float = 900.0) -> tuple[dict, float]:
+                 prompt_logprobs: int | None = None, timeout: float = 900.0,
+                 ignore_eos: bool = False) -> tuple[dict, float]:
         body = {"model": model, "prompt": prompt_ids, "max_tokens": max_tokens, "temperature": 0.0,
                 "seed": 0, "return_tokens_as_token_ids": True, "skip_special_tokens": False}
+        if ignore_eos:
+            body["ignore_eos"] = True
         if logprobs is not None:
             body["logprobs"] = logprobs
         if prompt_logprobs is not None:
