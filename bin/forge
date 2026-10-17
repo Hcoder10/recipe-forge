@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""recipe-forge fleet CLI (see forge/fleet/cli.py)."""
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+if os.name == "nt":       # the laptop controller keeps its state in the repo (gitignored)
+    os.environ.setdefault("FORGE_STATE", os.path.join(REPO, "state"))
+from forge.fleet.cli import main  # noqa: E402
+
+sys.exit(main())
