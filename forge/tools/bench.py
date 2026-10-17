@@ -24,7 +24,7 @@ class RemoteBenchRunner:
         self.timeout_s = timeout_s
 
     def run(self, mission, *, config_delta=None, env=None, bundle_dir=None, n_prompts=None,
-            fresh_reference=False, label="bench", confirm_pct=None) -> dict:
+            fresh_reference=False, label="bench", confirm_pct=None, mode=None, steps=64) -> dict:
         ws = self.ex.workspace(mission.id)
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (label or "bench"))[:24]
         stamp = f"{safe}-{int(time.time() * 1000)}"
@@ -45,14 +45,21 @@ class RemoteBenchRunner:
             else {"config_delta": config_delta, "env": env, "bundle_dir": bundle_dir},
         }
         spec_path = str(PurePosixPath(work) / "spec.json")
+        if mode == "profile":
+            spec.update(mode="profile", steps=steps, sandbox=True, candidate=None)
+            spec["recipe"]["drafter"] = rec.get("drafter") or {}
         self.ex.write_text(spec_path, json.dumps(spec))
         r = self.ex.run([self.python, "-m", "forge.tools.benchjob", "--spec", spec_path], cwd=self.forge_root,
                         env={"PYTHONPATH": self.forge_root}, timeout_s=self.timeout_s, kind="bench",
                         vram_gb=self.vram_gb, gpus=1, mission_id=mission.id, label=label)
         if r.infra_error:
+            if mode == "profile":
+                raise EnvBlocked("architecture profiling could not acquire or run its GPU job")
             raise EnvBlocked(f"bench could not run: {r.infra_error}")
         line = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("BENCH_RESULT ")), None)
         if line is None:
+            if mode == "profile":
+                raise EnvBlocked("architecture profile job did not return a result")
             err = (r.stderr or r.stdout).strip().splitlines()
             raise EnvBlocked(f"bench job failed (rc={r.rc}): {(err[-1] if err else 'no output')[:300]}")
         out = json.loads(line[len("BENCH_RESULT "):])
@@ -64,6 +71,9 @@ class RemoteBenchRunner:
             raise ToolError(f"bench failed: {out.get('error', '?')}")
         out["work_dir"] = work
         return out
+
+    def arch_profile(self, mission, n_prompts=4, steps=64):
+        return self.run(mission, n_prompts=n_prompts, steps=steps, mode="profile", label="arch-profile")
 
 
 class MockBenchRunner:
@@ -83,6 +93,12 @@ class MockBenchRunner:
             return self.fixed[key]
         h = int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
         return -0.06 + 0.14 * h
+
+    def arch_profile(self, mission, n_prompts=4, steps=64):
+        from forge.tools.benchjob import extract_structure
+        return {"structure": extract_structure({}, mission.recipe), "time_by_category_pct": None,
+                "idle_pct": None, "launches_per_step": None, "top_kernels": [],
+                "trace_path": None, "model_files": [], "reason": "Profiler unavailable in mock runner."}
 
     def run(self, mission, *, config_delta=None, env=None, bundle_dir=None, n_prompts=None,
             fresh_reference=False, label="bench", confirm_pct=None) -> dict:

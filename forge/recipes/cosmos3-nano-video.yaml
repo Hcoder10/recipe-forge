@@ -1,0 +1,71 @@
+# Research draft only. Empty variants prevent expansion by the current text gate.
+id: cosmos3-nano-video
+title: NVIDIA Cosmos 3 Nano text-to-video (adapter required)
+kind: video
+status: draft_unwired
+model: nvidia/Cosmos3-Nano
+revision: e59a53c25979a090fa8706c9acc0c254a6e89b92
+drafter: null
+engine: vllm-omni
+weights_gb: null  # Full pipeline resident memory has not been measured.
+vllm:
+  min_version: null
+  image: vllm/vllm-omni:cosmos3
+  run_image: null  # Resolve and pin a tested image digest before activation.
+  env: {}
+  extra_files: []
+serve:
+  args: ["--omni", "--host", "0.0.0.0", "--port", "8000", "--init-timeout", "1800"]
+  source: https://huggingface.co/nvidia/Cosmos3-Nano/blob/e59a53c25979a090fa8706c9acc0c254a6e89b92/README.md
+  quoted: |
+    vllm serve nvidia/Cosmos3-Nano \
+      --omni \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --init-timeout 1800
+  notes: "Official H200 video endpoint recipe; not a text-completions gate recipe. Command is documentation only and does not itself pin the model revision. See docs/cosmos3_feasibility.md."
+chat:
+  system_prompt: null
+  chat_template_kwargs: {}
+hardware:
+  fits: []  # No locally validated GPU/profile combination.
+  tensor_parallel: null
+  notes: "32 GB RTX 5090 fit unverified; 96 GB RTX PRO 6000 is an NVIDIA target, but this exact workload has not been validated here."
+variants: []
+video_draft:
+  task: text2video
+  endpoint: /v1/videos/sync
+  transport: form
+  accept: video/mp4
+  prompt_asset: assets/example_t2v_prompt.json
+  negative_prompt_asset: assets/negative_prompt.json
+  prompt_encoding: json_string
+  request:
+    size: "1280x720"
+    num_frames: 189
+    fps: 24
+    num_inference_steps: 35
+    guidance_scale: 6.0
+    max_sequence_length: 4096
+    flow_shift: 10.0
+    seed: 123
+    extra_params:
+      use_resolution_template: false
+      use_duration_template: false
+      guardrails: true
+  scheduler: UniPCMultistepScheduler
+  dtype: bfloat16
+  concurrency: 1
+  metric: seconds_per_clip
+  direction: minimize
+  equality:
+    mode: exact_decoded_tensor
+    atol: 0.0
+    rtol: 0.0
+    tensor_capture: adapter_required
+  activation_requires:
+    - video_bench_and_gate_adapter
+    - pinned_runtime_and_all_component_revisions
+    - validated_tensor_capture_and_reference_repeatability
+    - validated_peak_vram_under_landlord_lease
+    - operator_only_measurements_and_logs

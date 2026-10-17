@@ -33,7 +33,9 @@ def mission_brief(m) -> str:
         f"time box: {m.time_box_min:.0f} min; LLM budget: ${m.budget_usd:.2f}",
         f"team: lead, {m.n_workers} workers ({', '.join(m.worker_names)}), verifier",
         f"workspace on the target: {m.ws}",
-        "lanes: config (serve flags), env (environment variables), runtime (vLLM Python source), kernels "
+        "lanes: arch (initial architecture inspection), ssm, moe, attention, gemm/quant, launch-overhead; "
+        "shape lanes from arch_profile() before assigning experiments. Also: config (serve flags), "
+        "env (environment variables), runtime (vLLM Python source), kernels "
         "(Triton/CUDA in the workspace), drafter (speculative decoding drafter), system (machine-level settings "
         "a job may change)",
         "measurement: bench() runs the visible prompt set on a work GPU against a same-GPU reference. The gate "

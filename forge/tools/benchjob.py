@@ -11,10 +11,13 @@ Stdlib only (runs in the recipe's venv).
 from __future__ import annotations
 
 import argparse
+import ast
+import gzip
 import hashlib
 import json
 import math
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -114,7 +117,8 @@ def tail(p: Path, n: int) -> str:
         return ""
 
 
-def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | None) -> dict:
+def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | None,
+               token_clock=None) -> dict:
     """One streamed request. Returns tokens, ttft, decode time (first to last token)."""
     if chat:
         url = f"http://127.0.0.1:{port}/v1/chat/completions"
@@ -164,6 +168,8 @@ def stream_one(port: int, model: str, row: dict, max_tokens: int, chat: dict | N
             piece = (ch.get("text") or (ch.get("delta") or {}).get("content") or
                      (ch.get("delta") or {}).get("reasoning_content") or "")
             if piece:
+                if token_clock is not None:
+                    token_clock(time.time_ns() / 1000)
                 now = time.perf_counter()
                 first = first or now
                 last = now
@@ -303,7 +309,10 @@ class _Sandboxed:
         for k in ("LANDLORD_LEASE_ID", "FORGE_LEASE_IDS", "FORGE_GRANT_ID"):
             if os.environ.get(k):
                 senv[k] = os.environ[k]
-        self.job = launch(SbxSpec(cmd=argv, job_dir=str(job_dir), ro=ro, rw=[str(cache), str(short_tmp)], gpus=[gpu],
+        writable = [str(cache), str(short_tmp)]
+        if spec.get("mode") == "profile":
+            writable.append(str(work / "trace"))
+        self.job = launch(SbxSpec(cmd=argv, job_dir=str(job_dir), ro=ro, rw=writable, gpus=[gpu],
                                   ports=port_range, env=senv, path_prepend=[f"{venv}/bin"], cwd=cwd or None,
                                   name=f"bench-{label}-{os.getpid()}"))
         self.log_path = Path(self.job.log_path)
@@ -332,6 +341,12 @@ def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: st
     argv, extra_env = serve_command(spec["python"], rec["model"], rec["serve_args"], bundle_dir, port,
                                     config_delta, env_delta, hook_dir=hook)
     env = {**(rec.get("env") or {}), **extra_env}
+    if spec.get("mode") == "profile":
+        trace = work / "trace"
+        trace.mkdir(parents=True, exist_ok=True)
+        env["VLLM_TORCH_PROFILER_DIR"] = str(trace)
+        if spec.get("profiler_config"):
+            argv += ["--profiler-config", json.dumps({"profiler": "torch", "torch_profiler_dir": str(trace)})]
     t0 = time.time()
     if spec.get("sandbox", True):
         ro_extra = [str(hook)] if hook.exists() else []
@@ -348,12 +363,235 @@ def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: st
     try:
         wait_ready(port, srv, float(spec.get("startup_timeout_s", 900)), srv.log_path)
         startup = time.time() - t0
+        if spec.get("mode") == "profile":
+            return profile_workload(port, rec, spec, work)
         prompts = load_prompts(spec["prompts"], spec.get("n_prompts"))
         res = run_workload(port, rec.get("served_model_name") or rec["model"], prompts, spec["workload"])
         res["startup_s"] = round(startup, 1)
         return res
     finally:
         srv.stop()
+
+
+_CATEGORIES = [
+    ("communication", r"nccl|all_?reduce"),
+    ("memcpy/memset", r"memcpy|memset"),
+    ("ssm/mamba", r"selective_scan|ssd|mamba|causal_conv1d|chunk_scan|state_passing"),
+    ("moe", r"moe|topk.*expert|expert|grouped_gemm"),
+    ("attention", r"flash|fmha|paged|mla"),
+    ("norm/act", r"rms_?norm|layer_?norm|silu|gelu|act_and_mul"),
+    ("quant/dequant", r"fp4|fp8|nvfp4|scaled|quant"),
+    ("dense gemm", r"gemm|cutlass|cublas|nvjet|sm(?:90|100|120).*xmma"),
+    ("sampler/topk/softmax", r"sampl|top_?k|softmax"),
+]
+
+
+def parse_trace(trace, steps: int, decode_windows=None) -> dict:
+    """Aggregate GPU activities only; busy time is the union, not sum, of intervals.
+
+    Windows and Chrome timestamps are microseconds in the same clock domain.
+    Without explicit windows the activity extent is used (useful for trace fixtures).
+    """
+    if isinstance(trace, (str, Path)):
+        path = Path(trace)
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as f:
+            trace = json.load(f)
+    activities = [e for e in trace.get("traceEvents", []) if e.get("ph") == "X"
+                  and re.search(r"kernel|gpu_memcpy|gpu_memset", e.get("cat", ""), re.I)
+                  and float(e.get("dur", 0)) > 0]
+    if not activities or steps <= 0:
+        raise ValueError("no decode GPU activities")
+    windows = decode_windows or [(min(e["ts"] for e in activities),
+                                 max(e["ts"] + e["dur"] for e in activities))]
+    def merged(intervals):
+        result = []
+        for start, end in sorted(intervals):
+            if end <= start:
+                continue
+            if result and start <= result[-1][1]:
+                result[-1][1] = max(end, result[-1][1])
+            else:
+                result.append([start, end])
+        return result
+    windows = merged(windows)
+    totals = {key: 0.0 for key, _ in _CATEGORIES}
+    totals["other"] = 0.0
+    kernels, busy, launches = {}, [], 0
+    for e in activities:
+        clips = [(max(e["ts"], a), min(e["ts"] + e["dur"], b)) for a, b in windows]
+        clips = [(a, b) for a, b in clips if b > a]
+        duration = sum(b - a for a, b in clips)
+        if not duration:
+            continue
+        busy.extend(clips)
+        name = e.get("name", "unknown")
+        category = next((key for key, regex in _CATEGORIES if re.search(regex, name, re.I)), "other")
+        totals[category] += duration
+        if "kernel" in e.get("cat", "").lower():
+            launches += 1
+            item = kernels.setdefault(name, {"name": name, "time_us": 0.0, "count": 0})
+            item["time_us"] += duration
+            item["count"] += 1
+    total = sum(totals.values())
+    window = sum(b - a for a, b in windows)
+    if not total or not window:
+        raise ValueError("trace clock does not overlap decode window")
+    busy_pct = 100 * sum(b - a for a, b in merged(busy)) / window
+    return {"time_by_category_pct": {k: round(100 * v / total, 4) for k, v in totals.items()},
+            "busy_pct": round(busy_pct, 4), "idle_pct": round(100 - busy_pct, 4),
+            "launches_per_step": launches / steps,
+            "top_kernels": [{**k, "name": k["name"][:160]} for k in
+                            sorted(kernels.values(), key=lambda k: -k["time_us"])[:15]]}
+
+
+def extract_structure(config: dict, recipe=None) -> dict:
+    """Read structural fields only; never return arbitrary config or environment text."""
+    from forge.agents.winlib import arch_traits
+    from forge.tools.bundle import args_to_dict
+    recipe = recipe or {}
+    recipe = {**recipe, "serve": recipe.get("serve") or {"args": recipe.get("serve_args")}}
+    cfg = {**config, **(config.get("text_config") or {})}
+    structure = arch_traits(recipe, cfg)
+    pattern = cfg.get("hybrid_override_pattern") or cfg.get("layers_block_type") or cfg.get("layer_types") or []
+    pattern = list(pattern) if isinstance(pattern, str) and re.fullmatch(r"[M*EAS-]+", pattern) else pattern
+    if isinstance(pattern, str):
+        pattern = re.split(r"[,\s]+", pattern)
+    structure["layer_mix"] = {**structure["layer_mix"], "mlp": sum(
+        str(x).lower() in ("-", "mlp", "feed_forward", "ffn") for x in pattern)}
+    structure["architectures"] = cfg.get("architectures") or []
+    structure["num_experts_per_tok"] = cfg.get("num_experts_per_tok", cfg.get("moe_top_k", cfg.get("top_k")))
+    flags = args_to_dict(recipe["serve"].get("args"))
+    drafter = flags.get("--speculative-config") or recipe.get("drafter") or {}
+    if isinstance(drafter, str):
+        try:
+            drafter = json.loads(drafter)
+        except ValueError:
+            drafter = {}
+    structure["drafter_config"] = {k: drafter[k] for k in ("model", "method", "num_speculative_tokens")
+                                   if isinstance(drafter, dict) and k in drafter}
+    return structure
+
+
+def inspect_profile_target(spec):
+    """Inspect the recipe interpreter's installed sources without importing model code."""
+    script = '''import importlib.util,json
+from pathlib import Path
+s=importlib.util.find_spec("vllm")
+print(json.dumps(str(Path(s.origin).parent) if s else None))
+'''
+    config_path = Path(spec["recipe"]["model"]) / "config.json"
+    if not config_path.is_file():
+        hf = Path(spec.get("hf_home") or os.environ.get("HF_HOME", str(Path.home() / ".cache/huggingface")))
+        repo = hf / "hub" / ("models--" + spec["recipe"]["model"].replace("/", "--"))
+        revision = (repo / "refs/main").read_text().strip()
+        config_path = repo / "snapshots" / revision / "config.json"
+    structure = extract_structure(json.loads(config_path.read_text()), spec["recipe"])
+    files = []
+    try:
+        probe = subprocess.run([spec["python"], "-c", script], capture_output=True, text=True, timeout=30)
+        root_value = json.loads(probe.stdout)
+        root = Path(root_value) if root_value else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return structure, files, False
+    if root:
+        registry = root / "model_executor/models/registry.py"
+        try:
+            tree = ast.parse(registry.read_text())
+        except (OSError, SyntaxError):
+            tree = ast.Module(body=[], type_ignores=[])
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value in structure["architectures"]:
+                    try:
+                        entry = ast.literal_eval(value)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(entry, (list, tuple)) and entry and isinstance(entry[0], str):
+                        path = root / "model_executor/models" / (entry[0] + ".py")
+                        if path.is_file():
+                            files.append(str(path))
+        # Source inspection is done on the actual installed version, not a guessed version number.
+        endpoints = legacy = modern = False
+        for path in root.rglob("*.py"):
+            try:
+                source = path.read_text(errors="replace")
+            except OSError:
+                continue
+            endpoints |= "start_profile" in source and "stop_profile" in source
+            legacy |= '"VLLM_TORCH_PROFILER_DIR"' in source or "'VLLM_TORCH_PROFILER_DIR'" in source
+            modern |= "torch_profiler_dir" in source and "ProfilerConfig" in source
+        spec["profiler_config"] = modern
+        available = endpoints and (legacy or modern)
+    else:
+        available = False
+    return structure, sorted(set(files)), available
+
+
+def profile_workload(port, recipe, spec, work):
+    model = recipe.get("served_model_name") or recipe["model"]
+    chat = spec["workload"].get("chat") or None
+    if chat is True:
+        chat = {"on": True}
+    steps = int(spec.get("steps", 64))
+    stream_one(port, model, {"prompt": "Hello"}, steps, chat)
+    def post(action):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/{action}_profile", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=180):
+            pass
+    windows, decode_steps = [], 0
+    post("start")
+    try:
+        for _ in range(int(spec.get("n_prompts") or 4)):
+            stamps = []
+            result = stream_one(port, model, {"prompt": "Continue counting: one, two, three,"}, steps,
+                                chat, token_clock=stamps.append)
+            if not result["fixed_length"] or result["token_count_mismatch"] or len(stamps) < 2:
+                raise ValueError("fixed decode window unavailable")
+            windows.append((stamps[0], stamps[-1]))
+            decode_steps += result["tokens"] - 1
+    finally:
+        post("stop")
+    traces = sorted((work / "trace").rglob("*.json.gz"))
+    if not traces:
+        traces = sorted((work / "trace").rglob("*.json"))
+    if len(traces) != 1:
+        raise ValueError("expected one GPU trace")
+    opener = gzip.open if traces[0].suffix == ".gz" else open
+    with opener(traces[0], "rt", encoding="utf-8") as f:
+        trace = json.load(f)
+    base = trace.get("baseTimeNanoseconds", 0) / 1000
+    result = parse_trace(trace, decode_steps, [(a - base, b - base) for a, b in windows])
+    return {**result, "trace_path": str(traces[0]), "window_basis": "first-to-last streamed content per request"}
+
+
+def run_profile(spec, work, gpu):
+    out = {"structure": {}, "time_by_category_pct": None, "idle_pct": None,
+           "launches_per_step": None, "top_kernels": [], "trace_path": None, "model_files": []}
+    key = hashlib.sha256(canon({"recipe": spec["recipe"], "gpu": gpu,
+                               "steps": spec.get("steps", 64), "n": spec.get("n_prompts"),
+                               "version": 1}).encode()).hexdigest()[:20]
+    cache = Path(spec["ref_cache_dir"]) / f"arch-{key}.json"
+    try:
+        if cache.exists() and not gpu["uuid"].startswith("unknown-"):
+            cached = json.loads(cache.read_text())
+            if time.time() - cached.get("measured_at", 0) < float(spec.get("ref_max_age_s", 1800)):
+                return {**cached, "cached": True}
+        structure, files, available = inspect_profile_target(spec)
+        out.update(structure=structure, model_files=files)
+        if not available:
+            raise RuntimeError("profiler unavailable")
+        out.update(serve_and_measure(spec, None, None, None, "profile", work))
+    except Exception:
+        # Never expose server logs, config values or exception text through a fallback.
+        out["reason"] = "Profiling unavailable; only locally readable model structure is reported."
+    out.update(measured_at=time.time(), gpu=gpu)
+    if out["time_by_category_pct"] is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(out))
+    return out
 
 
 def main() -> None:
@@ -364,6 +602,9 @@ def main() -> None:
     work = Path(spec["work_dir"])
     work.mkdir(parents=True, exist_ok=True)
     gpu = gpu_identity()
+    if spec.get("mode") == "profile":
+        print("BENCH_RESULT " + json.dumps({"ok": True, **run_profile(spec, work, gpu)}), flush=True)
+        return
     out: dict = {"gpu": gpu}
     try:
         confirm_pct = confirmation_threshold(spec.get("confirm_pct"))

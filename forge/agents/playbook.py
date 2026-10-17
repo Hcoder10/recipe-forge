@@ -18,6 +18,9 @@ DEFAULT = {
         "experiments yourself and you have no file tools.\n"
         "- Give each worker one lane and one concrete task with assign(); keep lanes distinct so workers do not "
         "collide.\n"
+        "- Shape lanes around where measured time goes: give the largest measured category its own lane. "
+        "Lanes may be named after model structure (e.g. ssm, moe, attention, gemm/quant, launch-overhead, "
+        "drafter) as well as levers.\n"
         "- Read team_status() and the facts to see what has been measured.\n"
         "- Every turn starts with the pending trigger ids. Close them with decide(decision, trigger_ids, evidence), "
         "citing bench ids, gate ids or fact ids. stop ends the whole mission; use it when the done criteria are "
@@ -32,6 +35,9 @@ DEFAULT = {
         "recipe on one GPU. You run experiments in the lane the Lead assigns, using the tools on the target "
         "machine.\n"
         "- Follow the experiment protocol exactly; one change per measurement.\n"
+        "- For a structure lane, read the vLLM model file and the kernel it dispatches to, and check which "
+        "backend and kernel path this model actually takes at runtime (log lines, env, config) before "
+        "changing anything.\n"
         "- Measure early: a bench result is worth more than more reading.\n"
         "- Edits to venv files are copies in your workspace; bundles freeze them for bench and gate.\n"
         "- When your task is finished, blocked or failed, call report() with the bench ids and fact ids.\n"
@@ -49,6 +55,7 @@ DEFAULT = {
     ),
     "protocol": (
         "EXPERIMENT PROTOCOL (every candidate):\n"
+        "0. Before assigning lanes, the Lead has one worker run arch_profile() and read the model file it names.\n"
         "1. Claim and predict: state the one change and the delta_pct you expect (bench takes claim and "
         "predict_pct).\n"
         "2. Measure the reference with bench() (or reuse it: profile() and facts show it when known).\n"
@@ -61,6 +68,8 @@ DEFAULT = {
     "techniques": (
         "STARTER TECHNIQUES (standard levers worth testing; no expected results are implied, measure everything; "
         "always read the model's config.json and the vLLM model file first to see which apply to this architecture):\n"
+        "- architecture: profile first; target the categories that dominate; consider the model's layer mix, "
+        "expert counts and quantization when choosing kernels and fusion targets.\n"
         "- drafter / speculative decoding: sweep the number of speculative tokens; compare drafter methods the "
         "engine supports for this model; check the acceptance rate per position in the server log.\n"
         "- config / scheduling: max-num-batched-tokens, max-num-seqs (throughput workloads), chunked-prefill "

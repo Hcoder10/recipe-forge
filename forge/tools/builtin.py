@@ -14,6 +14,7 @@ from forge.tools.bundle import canon, hash_files, normalize_delta
 from forge.tools.registry import EnvBlocked, Registry, Tool, ToolError
 
 LANES = ["config", "env", "runtime", "kernels", "drafter", "system"]
+LANES += ["arch", "ssm", "moe", "attention", "gemm/quant", "launch-overhead"]
 W, L, V = "worker", "lead", "verifier"
 
 
@@ -78,6 +79,20 @@ def _read_current(ctx, path: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------- high-level
+def t_arch_profile(ctx, n_prompts=4, steps=64):
+    if not 1 <= n_prompts <= 32 or not 2 <= steps <= 512:
+        raise ToolError("n_prompts must be 1..32 and steps must be 2..512")
+    out = ctx.services.bench.arch_profile(ctx.mission, n_prompts=n_prompts, steps=steps)
+    fid = ctx.services.brain.add({
+        "claim": "Architecture inspection completed; read the named model implementation before assigning lanes.",
+        "lane": "arch", "status": "measured" if out.get("time_by_category_pct") is not None else "open",
+        "evidence": json.dumps({"structure": out.get("structure"), "model_files": out.get("model_files"),
+                                "trace_path": out.get("trace_path")}),
+        "recipe_id": ctx.mission.recipe_id, "gpu_class": ctx.mission.gpu_class,
+        "mission_id": ctx.mission.id, "by": ctx.agent})
+    return {**out, "fact_id": fid}
+
+
 def t_profile(ctx):
     m = ctx.mission
     info = {"recipe_id": m.recipe_id, "model": m.recipe["model"], "serve_args": m.recipe["serve"]["args"],
@@ -585,6 +600,9 @@ def t_py(ctx, code, timeout_s=300):
 def build_registry() -> Registry:
     reg = Registry()
     add = reg.add
+    add(Tool("arch_profile", "Inspect reference model structure and collect a sandboxed decode trace.",
+             _obj({"n_prompts": I, "steps": I}), t_arch_profile, (W,), order=3, light=False,
+             returns="structure, category timings, idle fraction, launches, kernel counts and model files."))
     add(Tool("profile", "Mission target snapshot: recipe serve args, workload, metric, GPU, vLLM/torch versions, "
              "paths, and the reference measurement if one exists.", _obj({}), t_profile, (W, L, V), order=1,
              returns="a dict."))

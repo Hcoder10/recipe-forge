@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import threading
 from pathlib import Path
 
@@ -91,6 +92,63 @@ def _number(value):
         return None
 
 
+def _target_file(value):
+    path = str(value).replace("\\", "/")
+    if "vllm/" in path:
+        return "vllm/" + path.split("vllm/", 1)[1]
+    return re.sub(r"^(?:[ab]/|overlays/)", "", path)
+
+
+def code_targets(files_or_targets, diffs=None):
+    """Normalize overlay manifests and explicit targets; infer functions only from diff hunks."""
+    if isinstance(files_or_targets, str):
+        files_or_targets = [files_or_targets]
+    if isinstance(files_or_targets, dict):
+        if "file" in files_or_targets or "path" in files_or_targets:
+            files_or_targets = [files_or_targets]
+        else:
+            files_or_targets = [{"file": k, **(v if isinstance(v, dict) else {})}
+                                for k, v in files_or_targets.items()]
+    by_file = {}
+    for item in files_or_targets or []:
+        item = {"file": item} if isinstance(item, str) else item
+        path = _target_file(item.get("file") or item.get("path") or "")
+        if not path:
+            continue
+        funcs = item.get("functions") or ([item["function"]] if item.get("function") else [])
+        if isinstance(funcs, str):
+            funcs = [funcs]
+        by_file.setdefault(path, set()).update(funcs)
+        if item.get("diff"):
+            diffs = {**(diffs if isinstance(diffs, dict) else {}), path: item["diff"]}
+    chunks = diffs.items() if isinstance(diffs, dict) else [(None, diffs or "")]
+    for path, diff in chunks:
+        current = _target_file(path) if path else None
+        in_hunk = False
+        for line in str(diff).splitlines():
+            if line.startswith("+++ "):
+                current = _target_file(line[4:].split("\t")[0])
+                in_hunk = False
+            elif line.startswith("@@"):
+                in_hunk = True
+            if in_hunk and current in by_file:
+                match = re.search(r"\b(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(", line)
+                if match:
+                    by_file[current].add(match[1])
+    return [{"file": path, "functions": sorted(funcs)} for path, funcs in sorted(by_file.items())]
+
+
+def match_code(files_or_targets, entries) -> str | None:
+    """Require a shared file AND function; unknown functions never imply code equivalence."""
+    wanted = code_targets(files_or_targets)
+    for entry in entries:
+        targets = code_targets(entry.get("targets") or (entry.get("change") or {}).get("targets"))
+        if any(a["file"] == b["file"] and set(a["functions"]) & set(b["functions"])
+               for a in wanted for b in targets):
+            return entry["entry_id"]
+    return None
+
+
 def distill(mission_dir: Path, recipe: dict, model_config: dict | None, gpu_class: str) -> list[dict]:
     """Return newly appended entries. Repeated measurements collapse to their latest result."""
     mission_dir = Path(mission_dir)
@@ -106,7 +164,11 @@ def distill(mission_dir: Path, recipe: dict, model_config: dict | None, gpu_clas
             continue
         bundle = bench.get("bundle")
         info = next((r for r in requests if bundle and r.get("bundle") == bundle), {})
-        manifest = info.get("manifest") or (bundle if isinstance(bundle, dict) else {})
+        manifest = info.get("manifest") or bench.get("manifest") or (bundle if isinstance(bundle, dict) else {})
+        if not manifest and isinstance(bundle, str):
+            bundle_path = mission_dir / "bundles" / bundle / "manifest.json"
+            if bundle_path.is_file() and bundle_path.resolve().is_relative_to(mission_dir.resolve()):
+                manifest = json.loads(bundle_path.read_text())
         change = _flags(bench.get("config_delta") or manifest.get("config_delta"),
                         bench.get("env") or manifest.get("env"))
         if bundle:
@@ -125,6 +187,16 @@ def distill(mission_dir: Path, recipe: dict, model_config: dict | None, gpu_clas
             or (info.get("id") and r.get("request_id") == info["id"]))]
         gate = next((r for r in reversed(gates) if r.get("verdict") in
                      ("win", "loss", "lossy", "gated_win", "gated_loss")), None)
+        targets = code_targets(manifest.get("overlays") or files,
+                               bench.get("diffs") or bench.get("diff") or manifest.get("diffs") or manifest.get("diff"))
+        category = next((r.get("arch_profile_category") or
+                         (r.get("arch_profile") or {}).get("category") for r in
+                         [gate or {}, bench, bench.get("result") or {}]
+                         if r.get("arch_profile_category") or isinstance(r.get("arch_profile"), dict)
+                         and r["arch_profile"].get("category")), None)
+        if category:
+            for target in targets:
+                target["category"] = category
         outcome = "quick_gain" if delta > 0 else "quick_loss"
         evidence = [bench["bench_id"]] if bench.get("bench_id") else []
         if gate:
@@ -145,7 +217,7 @@ def distill(mission_dir: Path, recipe: dict, model_config: dict | None, gpu_clas
         grouped[key] = {"entry_id": key, "mission_id": mid, "recipe_id": recipe.get("id"),
                         "gpu_class": gpu_class, "traits": traits, "lane": lane, "change": change,
                         "outcome": {"kind": outcome, "delta_pct": delta, "evidence": evidence},
-                        "by": bench.get("by", "unknown")}
+                        "by": bench.get("by", "unknown"), "targets": targets}
     with _LOCK:
         known = {r["entry_id"] for r in events.read(_path("entries"))}
         return [events.append(_path("entries"), row) for key, row in grouped.items() if key not in known]
@@ -158,6 +230,17 @@ def relevant(traits: dict, gpu_class: str, k: int = 12) -> list[dict]:
                      ("layer_mix", 4), ("quantization", 2), ("drafter", 2), ("drafter_method", 1))
                      if traits.get(key) is not None and traits.get(key) == other.get(key))
         points += 3 * bool(gpu_class and entry.get("gpu_class") == gpu_class)
+        targets = entry.get("targets") or []
+        files = {_target_file(f) for f in traits.get("model_files", [])}
+        same_arch = bool(traits.get("architecture") and traits["architecture"] == other.get("architecture"))
+        categories = {k for k, v in (traits.get("layer_mix") or {}).items() if v}
+        if "ssm" in categories:
+            categories.add("ssm/mamba")
+        if "mlp" in categories:
+            categories.add("dense gemm")
+        points += 6 * any(_target_file(t.get("file", "")) in files or
+                          same_arch and "/models/" in t.get("file", "") for t in targets)
+        points += 4 * any(t.get("category") in categories for t in targets)
         a, b = _number(traits.get("concurrency")), _number(other.get("concurrency"))
         if a and b and a > 0 and b > 0:
             points += 2 / (1 + abs(math.log2(a / b)))
@@ -176,9 +259,9 @@ def render(entries) -> str:
         where = {k: traits[k] for k in ("architecture", "layer_mix", "quantization", "drafter",
                                        "concurrency") if traits.get(k) is not None}
         where["gpu"] = entry.get("gpu_class")
-        known = " (known non-win)" if outcome.get("kind") not in ("gated_win", "quick_gain") else ""
-        line = (f"{outcome.get('kind')}{known} {outcome.get('delta_pct')}% | {entry.get('lane')} | "
-                f"{str(entry.get('change', {}).get('summary', ''))[:160]} | "
+        # Agent-facing text is an index, never a historical speed finding or recommendation.
+        line = (f"entry {entry.get('entry_id')} | {entry.get('lane')} | "
+                f"targets {_canon(entry.get('targets') or [])[:400]} | "
                 f"where {_canon(where)[:250]} | evidence {','.join(outcome.get('evidence', []))[:100]}")
         line = " ".join(line.split())
         # A conservative UTF-8 byte budget also bounds unusually token-dense text.
