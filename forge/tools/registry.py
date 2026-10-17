@@ -17,6 +17,11 @@ from typing import Any, Callable
 from forge.tools.schema import ArgError, coerce
 
 RESULT_CHARS = 6000
+# Common argument-name slips, mapped only when the alias is a real parameter of the tool being called.
+ALIASES = {"limit": "lines", "num_lines": "lines", "n_lines": "lines", "offset": "start", "line": "start",
+           "start_line": "start", "file": "path", "filename": "path", "command": "cmd", "delta": "config_delta",
+           "config": "config_delta", "bundle_id": "bundle", "query": "pattern", "regex": "pattern",
+           "message": "text", "note": "text"}
 
 
 class ToolError(Exception):
@@ -82,6 +87,12 @@ class Registry:
                     "error": f"no tool {name!r} for {role}; available: {allowed}"}
         if parse_error:
             return {"ok": False, "class": "agent_error", "error": f"{name}: {parse_error}"}
+        props = tool.params.get("properties") or {}
+        args = {ALIASES[k] if k not in props and ALIASES.get(k) in props else k: v for k, v in (args or {}).items()}
+        unknown = [k for k in args if k not in props]
+        if unknown:
+            return {"ok": False, "class": "agent_error",
+                    "error": f"{name}: unknown argument {unknown[0]!r}; allowed: {', '.join(props) or 'none'}"}
         try:
             clean = coerce(args, tool.params)
         except ArgError as e:

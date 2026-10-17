@@ -198,3 +198,13 @@ def test_mechanic_compare_and_propose(tmp_path):
     assert mechanic.propose([], "base", tmp_path, client=client) is None
     assert any(r["event"] == "rejected_proposal" for r in
                map(json.loads, (tmp_path / "n1/log.jsonl").read_text().splitlines()))
+
+
+def test_unknown_args_and_aliases():
+    reg = Registry()
+    reg.add(Tool("read", "t", {"type": "object", "properties": {"path": {"type": "string"},
+                                                                 "lines": {"type": "integer"}}},
+                 lambda ctx, path, lines=10: {"lines": lines}))
+    assert reg.dispatch(None, "worker", "read", {"path": "a", "limit": "40"})["lines"] == 40
+    r = reg.dispatch(None, "worker", "read", {"path": "a", "bogus": 1})
+    assert r["class"] == "agent_error" and "bogus" in r["error"]
