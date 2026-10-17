@@ -104,6 +104,7 @@ def main(argv=None) -> int:
     st = load_status()
     st["plan"] = plan
     st.pop("failed", None)
+    st["ready"] = False          # set again only when every step of this plan is done
     for name in [s for s in a.redo.split(",") if s]:
         st["steps"].pop(name, None)
     save_status(st)
