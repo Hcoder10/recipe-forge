@@ -88,6 +88,8 @@ def load_recipe(recipe_id: str) -> dict:
 def resolve(recipe_id: str, recipe: dict | None = None) -> tuple[dict, str, dict]:
     """'<id>' or '<id>:<variant>' -> (recipe, recipe_key, workload dict)."""
     rid, _, variant = recipe_id.partition(":")
+    if not variant and "." in rid and not os.path.exists(os.path.join(PKG, "recipes", rid + ".yaml")):
+        rid, _, variant = rid.rpartition(".")      # fleet's older '<base>.<variant>' form
     recipe = recipe or load_recipe(rid)
     wl = dict(recipe.get("workload") or {})
     variants = recipe.get("variants") or []
