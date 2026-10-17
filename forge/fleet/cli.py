@@ -92,17 +92,11 @@ def cmd_deploy(a) -> int:
 
 
 def deploy(m: dict) -> None:
-    import hashlib
-    from pathlib import Path
     ex = executor_for(m)
     root = m["forge_root"]
     n = ex.put_tree(prov.REPO, root, excludes=("__pycache__", ".git", "state", "results", "*.pyc", "runs", ".claude"))
-    # verify: content hash of every .py file, laptop vs target (CRLF normalised like tar_bytes does)
-    local = {}
-    for f in sorted((prov.REPO / "forge").rglob("*.py")):
-        if "__pycache__" in f.parts:
-            continue
-        local[f.relative_to(prov.REPO).as_posix()] = hashlib.md5(f.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    # verify: every .py file on the target matches the bytes that were sent
+    local = {k: v for k, v in ex.last_manifest.items() if k.endswith(".py")}
     r = ex.sh(f"cd {root} && find forge bin -name '*.py' -not -path '*/__pycache__/*' -exec md5sum {{}} +", timeout_s=120)
     remote = {line.split()[1]: line.split()[0] for line in r.stdout.splitlines() if len(line.split()) == 2}
     bad = [k for k, v in local.items() if remote.get(k) != v]

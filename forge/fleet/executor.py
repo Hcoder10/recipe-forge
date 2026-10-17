@@ -258,7 +258,9 @@ class FleetExecutor:
     # ------------------------------------------------------------------ transfer
     def put_tree(self, local_dir: str | Path, remote_dir: str, excludes: tuple[str, ...] = ("__pycache__", ".git", "state", "*.pyc")) -> int:
         """Copy local_dir's contents into remote_dir (tar over the transport). Returns bytes sent."""
-        data = tar_bytes(Path(local_dir), excludes)
+        manifest: dict[str, str] = {}
+        data = tar_bytes(Path(local_dir), excludes, manifest)
+        self.last_manifest = manifest
         rc, _, err, _, infra = self._exec(f"mkdir -p {self._path(remote_dir)} && tar xzf - -C {self._path(remote_dir)}",
                                           stdin=data, timeout=1800)
         if infra:
@@ -316,8 +318,10 @@ class ExecutorError(RuntimeError):
     """The machine could not be reached or the operation could not run (infrastructure)."""
 
 
-def tar_bytes(src: Path, excludes: tuple[str, ...] = ()) -> bytes:
+def tar_bytes(src: Path, excludes: tuple[str, ...] = (), manifest: dict | None = None) -> bytes:
+    """tar.gz of src; fills manifest {rel: md5 of the bytes sent} when given."""
     import fnmatch
+    import hashlib
     buf = io.BytesIO()
 
     def skip(rel: str) -> bool:
@@ -340,6 +344,8 @@ def tar_bytes(src: Path, excludes: tuple[str, ...] = ()) -> bytes:
             if rel.endswith((".py", ".sh", ".yaml", ".md", ".json", ".jsonl", ".txt")) or rel.startswith("bin/"):
                 data = data.replace(b"\r\n", b"\n")      # code runs on Linux
             info.size = len(data)
+            if manifest is not None:
+                manifest[rel] = hashlib.md5(data).hexdigest()
             tf.addfile(info, io.BytesIO(data))
     return buf.getvalue()
 
