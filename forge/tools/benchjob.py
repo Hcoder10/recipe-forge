@@ -193,6 +193,16 @@ class _Plain:
 SEED_CACHES = ("flashinfer", "b12x")   # prebuilt JIT kernels; the sandbox has no nvcc to rebuild them
 
 
+def cuda_home(python: str) -> str | None:
+    """The venv's pip CUDA toolkit (nvidia/cu*/bin/nvcc), for JIT kernel builds when /usr/local/cuda is absent."""
+    if os.environ.get("CUDA_HOME"):
+        return os.environ["CUDA_HOME"]
+    venv = Path(python).parent.parent
+    for nvcc in sorted(venv.glob("lib/python3*/site-packages/nvidia/cu*/bin/nvcc"), reverse=True):
+        return str(nvcc.parent.parent)
+    return None
+
+
 def seed_caches(cache: Path) -> None:
     """One shared, writable bench cache per machine, seeded once from the user's prebuilt kernel caches."""
     dst = cache / "home" / ".cache"
@@ -222,6 +232,9 @@ class _Sandboxed:
                      "XDG_CACHE_HOME": str(cache / "home" / ".cache")})
         if spec.get("hf_home"):
             senv["HF_HOME"] = spec["hf_home"]
+        cuda = cuda_home(spec["python"])
+        if cuda and "CUDA_HOME" not in senv:
+            senv["CUDA_HOME"] = cuda
         for k in ("LANDLORD_LEASE_ID", "FORGE_LEASE_IDS", "FORGE_GRANT_ID"):
             if os.environ.get(k):
                 senv[k] = os.environ[k]
@@ -257,6 +270,8 @@ def serve_and_measure(spec: dict, bundle_dir, config_delta, env_delta, label: st
                          (int(lo), int(hi)) if lo and hi else (port, port))
     else:
         env.setdefault("VLLM_CACHE_ROOT", str(work / f"cache-{label}"))
+        if cuda_home(spec["python"]):
+            env.setdefault("CUDA_HOME", cuda_home(spec["python"]))
         srv = _Plain(argv, env, spec.get("serve_cwd"), work / f"server-{label}.log")
     try:
         wait_ready(port, srv, float(spec.get("startup_timeout_s", 900)), srv.log_path)
