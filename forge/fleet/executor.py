@@ -285,6 +285,33 @@ class FleetExecutor:
         return names
 
 
+    def stat_tree(self, root: str) -> dict[str, tuple[int, float]]:
+        """{relative path: (size, mtime)} for files under root ({} if missing)."""
+        r = self.sh(f"test -d {self._path(root)} && find {self._path(root)} -type f -printf '%s %T@ %P\n'", timeout_s=120)
+        out = {}
+        for line in r.stdout.splitlines():
+            parts = line.split(" ", 2)
+            if len(parts) == 3:
+                out[parts[2]] = (int(parts[0]), float(parts[1]))
+        return out
+
+    def get_files(self, root: str, rels: list[str], local_dir: str | Path) -> int:
+        """Copy the listed files (relative to root) into local_dir, keeping their relative paths."""
+        if not rels:
+            return 0
+        listing = ("\n".join(rels) + "\n").encode()
+        rc, out, err, _, infra = self._exec(f"cd {self._path(root)} && tar czf - -T -", stdin=listing, timeout=3600)
+        if infra:
+            raise ExecutorError(infra)
+        if rc not in (0, 1):     # 1: a file changed while being read; it is fetched again next round
+            raise OSError(f"get_files {self.name}:{root}: {err.decode(errors='replace').strip()[-300:]}")
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(out), mode="r:gz") as tf:
+            ms = [m for m in tf.getmembers() if m.isfile() and not m.name.startswith(("/", "..")) and "/../" not in m.name]
+            tf.extractall(local_dir, members=ms)
+        return len(ms)
+
+
 class ExecutorError(RuntimeError):
     """The machine could not be reached or the operation could not run (infrastructure)."""
 
