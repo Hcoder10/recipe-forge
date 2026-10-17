@@ -484,6 +484,8 @@ class MissionRunner:
                 still = {t["id"] for t in self.decisions.pending()}
                 if not out["called"] and not still:
                     break
+                if not still and set(out["called"]) <= {"team_status", "facts", "gate_status", "gate_requests"}:
+                    break             # only looked around, nothing to close: wait for the next event
                 if not still and "decide" in out["called"]:
                     break
                 if before and still == before and not out["called"]:
