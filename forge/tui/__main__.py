@@ -99,6 +99,10 @@ class App:
         self.scroll = 0
         self.last_poll = 0.0
         self.pending_stop: tuple[str, str] | None = None
+        self.history: list[str] = []
+        self.history_pos = 0
+        self.history_draft = ""
+        self.sent_notes = []
 
     # ---------------------------------------------------------------- data
     def mission_dir(self, mid: str) -> str | None:
@@ -127,6 +131,38 @@ class App:
                 if f:
                     self.lines.append((_ts(ev.get("t") or ev.get("ts")) or 0, *f))
             self.lines = self.lines[-3000:]
+        self.refresh_notes()
+
+    def refresh_notes(self):
+        if self.view == "notes":
+            self.panel = data.notes_lines(self.root, self.current())
+        if self.sent_notes:
+            statuses = []
+            for mission, note in self.sent_notes:
+                records = data.notes_data(self.root, mission, limit=1000000)
+                status = next((r["status"] for r in records if r.get("t") == note["t"]
+                               and r.get("to") == note["to"]), "queued")
+                statuses.append(f"{mission}: {status}")
+            self.msg = "; ".join(statuses) + " | " + data.REMOTE_NOTE_LAG
+
+    def recall(self, direction):
+        if self.history_pos == len(self.history):
+            self.history_draft = self.buf
+        self.history_pos = max(0, min(len(self.history), self.history_pos + direction))
+        self.buf = (self.history[self.history_pos] if self.history_pos < len(self.history)
+                    else self.history_draft)
+
+    def prompt(self):
+        target, fleet = "lead", False
+        try:
+            target, _, fleet = data.parse_steer(self.buf)
+        except ValueError:
+            # Show the chosen recipient even before the message has been typed.
+            try:
+                target, _, fleet = data.parse_steer(self.buf + " message")
+            except ValueError:
+                pass
+        return f"steer[{self.current() or 'no mission'}{' / fleet' if fleet else ''} -> {target}]> "
 
     def inbox(self, mid: str) -> list[dict]:
         d = self.mission_dir(mid)
@@ -161,6 +197,10 @@ class App:
         line = line.strip()
         if not line:
             return True
+        self.history.append(line)
+        self.history_pos = len(self.history)
+        self.history_draft = ""
+        self.sent_notes = []
         mid = self.current()
         if self.pending_stop:
             target, reason = self.pending_stop
@@ -174,13 +214,10 @@ class App:
             else:
                 self.msg = "stop cancelled"
             return True
-        if not line.startswith("/"):
-            if not mid:
-                self.msg = "no mission to send the note to"
-                return True
-            self.append(mid, "operator_notes.jsonl", {"t": time.time(), "by": "operator", "to": "lead", "text": line})
-            self.lines.append((time.time(), "operator", "you", f"note to lead: {line}"))
-            self.msg = f"note sent to {mid} lead"
+        if not line.startswith("/") or line.split(None, 1)[0] == "/steer":
+            self.sent_notes = data.steer_data(self.root, mid, line)
+            self.msg = "no running missions" if not self.sent_notes else "queued"
+            self.refresh_notes()
             return True
         cmd, _, arg = line[1:].partition(" ")
         arg = arg.strip()
@@ -190,8 +227,13 @@ class App:
             self.show("help", ["/missions  /mission <id>  /inbox  /answer <question_id> <text>",
                                "/leaderboard  /compare [mission|all]  /gate  /facts [mission]  /n1",
                                "/pause [reason]  /resume [reason]  /stop [reason] (confirm y/n)",
-                               "/help  /quit; free text sends an operator note to Lead",
-                               "keys: PgUp/PgDn scroll, Esc back to transcript"])
+                               "/steer [lead|worker-N|verifier|all] <text>; default: lead",
+                               "@worker-2 <text>; /steer --fleet <text> sends to every RUNNING mission's lead",
+                               "/notes: last 20 notes and delivery status; free text steers Lead",
+                               data.REMOTE_NOTE_LAG,
+                               "/help  /quit; keys: Up/Down input history, PgUp/PgDn scroll, Esc transcript"])
+        elif cmd == "notes":
+            self.show("notes", data.notes_lines(self.root, mid))
         elif cmd == "compare":
             fleet = arg in ("all", "fleet") or (not arg and not mid)
             target = None if fleet else arg or mid
@@ -313,9 +355,12 @@ class App:
                 put(top + i, 1, line)
         put(h - 3, 0, "-" * (w - 1), curses.A_DIM)
         put(h - 2, 0, f" {self.msg}", curses.A_DIM)
-        put(h - 1, 0, "> " + self.buf[-(w - 4):], curses.A_BOLD)
+        prompt = self.prompt()
+        available = max(0, w - len(prompt) - 2)
+        visible = self.buf[-available:] if available else ""
+        put(h - 1, 0, prompt + visible, curses.A_BOLD)
         try:
-            scr.move(h - 1, min(w - 2, 2 + len(self.buf)))
+            scr.move(h - 1, max(0, min(w - 2, len(prompt) + len(visible))))
         except curses.error:
             pass
         scr.refresh()
@@ -336,7 +381,10 @@ class App:
                     self.msg = f"read error: {type(e).__name__}: {e}"[:200]
                 self.last_poll = time.time()
             self.draw(scr)
-            ch = scr.get_wch() if hasattr(scr, "get_wch") else scr.getch()
+            try:
+                ch = scr.get_wch() if hasattr(scr, "get_wch") else scr.getch()
+            except curses.error:  # get_wch raises on the refresh timeout.
+                continue
             if ch in (-1, curses.ERR):
                 continue
             if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
@@ -357,6 +405,10 @@ class App:
                 self.scroll += 10
             elif ch == curses.KEY_NPAGE:
                 self.scroll = max(0, self.scroll - 10)
+            elif ch == curses.KEY_UP:
+                self.recall(-1)
+            elif ch == curses.KEY_DOWN:
+                self.recall(1)
             elif ch == "?" and not self.buf:
                 self.run_command("/help")
             elif isinstance(ch, str) and ch.isprintable():

@@ -70,6 +70,93 @@ class CommandDataTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
 
+    def test_steering_target_parsing(self):
+        for line, expected in [
+            ("check logs", ("lead", "check logs", False)),
+            ("/steer check logs", ("lead", "check logs", False)),
+            ("/steer lead check logs", ("lead", "check logs", False)),
+            ("/steer worker-2 check logs", ("worker-2", "check logs", False)),
+            ("@worker-2 check logs", ("worker-2", "check logs", False)),
+            ("/steer verifier check logs", ("verifier", "check logs", False)),
+            ("/steer all check logs", ("all", "check logs", False)),
+            ("/steer --fleet check logs", ("lead", "check logs", True)),
+            (" /steer\tworker-2\tcheck logs ", ("worker-2", "check logs", False)),
+        ]:
+            with self.subTest(line=line):
+                self.assertEqual(data.parse_steer(line), expected)
+        for line in ("", "/steer", "/steer all", "@worker-2", "@unknown hello",
+                     "/steer worker-x hello", "/steer --bad hello", "/steer --fleet"):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                data.parse_steer(line)
+
+    def test_steering_fleet_fanout_and_append_contract(self):
+        for mid in ("b", "ended"):
+            (self.root / "missions" / mid).mkdir()
+        self.write_rows(self.root / "missions" / "ended" / "events.jsonl",
+                        [{"kind": "mission_end"}, {"kind": "other"}])
+        self.write_rows(self.mission / "events.jsonl", [{"kind": "mission_start"}])
+        first = data.steer_data(self.root, "a", "@worker-2 check logs")
+        sent = data.steer_data(self.root.parent, None, "/steer --fleet review logs")
+        self.assertEqual([mid for mid, _ in sent], ["a", "b"])
+        self.assertEqual(data.rows(self.mission / "operator_notes.jsonl"), [first[0][1], sent[0][1]])
+        self.assertFalse((self.root / "missions" / "ended" / "operator_notes.jsonl").exists())
+        for _, row in sent:
+            self.assertEqual(set(row), {"t", "by", "to", "text"})
+            self.assertEqual((row["by"], row["to"], row["text"]), ("operator", "lead", "review logs"))
+            self.assertIsInstance(row["t"], float)
+        with self.assertRaises(OSError):
+            data.steer_data(self.root, "missing", "check logs")
+
+    def test_delivery_matching_consumes_events_once(self):
+        notes = [{"t": 10, "to": "lead"}, {"t": 11, "to": "lead"},
+                 {"t": 12, "to": "worker-2"}, {"t": 12, "to": "all"}]
+        events = [{"kind": "operator_note", "t": 9, "to": "lead"},
+                  {"kind": "operator_note", "t": 10, "to": "lead"},
+                  {"kind": "other", "t": 13, "to": "lead"},
+                  {"kind": "operator_note", "t": "nan", "to": "lead"},
+                  {"kind": "operator_note", "t": 13, "to": "verifier"},
+                  {"kind": "operator_note", "t": 13, "to": "lead"},
+                  {"kind": "operator_note", "t": 14, "to": "worker-2"}]
+        self.assertEqual(data.note_deliveries(notes, events),
+                         ["delivered to lead", "queued", "delivered to worker-2", "queued"])
+        events.extend([{"kind": "operator_note", "t": 15, "to": target} for target in ("lead", "all")])
+        self.assertEqual(data.note_deliveries(notes, events),
+                         ["delivered to lead", "delivered to lead", "delivered to worker-2", "delivered to all"])
+
+    def test_notes_match_before_last_twenty_limit(self):
+        notes = [{"t": i, "to": "lead", "text": "review logs"} for i in range(25)]
+        self.write_rows(self.mission / "operator_notes.jsonl", notes)
+        self.write_rows(self.mission / "events.jsonl", [{"kind": "operator_note", "t": 30, "to": "lead"}])
+        recent = data.notes_data(self.root, "a")
+        self.assertEqual(len(recent), 20)
+        self.assertEqual(recent[0]["t"], 5)
+        self.assertTrue(all(r["status"] == "queued" for r in recent))
+
+    def test_steering_ui_history_prompt_and_live_delivery(self):
+        app = App(str(self.root))
+        app.focus = "a"
+        app.buf = "@worker-2 check logs"
+        self.assertIn("a -> worker-2", app.prompt())
+        app.run_command(app.buf)
+        self.assertIn("queued", app.msg)
+        self.assertIn("~60 s", app.msg)
+        note = data.rows(self.mission / "operator_notes.jsonl")[0]
+        self.write_rows(self.mission / "events.jsonl", [
+            {"kind": "operator_note", "t": note["t"] + 1, "to": "worker-2"}])
+        app.refresh_notes()
+        self.assertIn("delivered to worker-2", app.msg)
+        app.buf = "draft"
+        app.recall(-1)
+        self.assertEqual(app.buf, "@worker-2 check logs")
+        app.recall(-1)
+        self.assertEqual(app.buf, "@worker-2 check logs")
+        app.recall(1)
+        self.assertEqual(app.buf, "draft")
+        app.run_command("/notes")
+        self.assertTrue(any("delivered to worker-2" in line for line in app.panel))
+        app.run_command("/help")
+        self.assertTrue(any("/steer" in line for line in app.panel))
+
     def bench(self, ref, cand):
         return {"result": {"reference": {"decode_tok_s": ref},
                            "candidate": {"decode_tok_s": cand}}}

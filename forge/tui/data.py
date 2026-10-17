@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from pathlib import Path
 
@@ -159,6 +160,94 @@ def control_data(root, mid, action, reason="", *, confirmed=False):
     with (path / "control.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row) + "\n")
     return row
+
+
+REMOTE_NOTE_LAG = "Remote delivery status may lag ~60 s while events are pulled."
+
+
+def steering_target(value):
+    return value in ("lead", "verifier", "all") or bool(re.fullmatch(r"worker-[0-9]+", value))
+
+
+def parse_steer(line):
+    """Return (target, text, fleet) for free text or explicit steering syntax."""
+    line = line.strip()
+    target, fleet = "lead", False
+    parts = line.split(None, 1)
+    if parts and parts[0] == "/steer":
+        line = parts[1].strip() if len(parts) == 2 else ""
+        parts = line.split(None, 1)
+        if parts and parts[0] == "--fleet":
+            fleet = True
+            line = parts[1].strip() if len(parts) == 2 else ""
+        elif parts and steering_target(parts[0]):
+            target = parts[0]
+            line = parts[1].strip() if len(parts) == 2 else ""
+        elif parts and parts[0].startswith(("--", "worker-", "@")):
+            raise ValueError("invalid steering target or option")
+    elif line.startswith("@"):
+        target = parts[0][1:]
+        if not steering_target(target):
+            raise ValueError("invalid steering target")
+        line = parts[1].strip() if len(parts) == 2 else ""
+    elif line.startswith("/"):
+        raise ValueError("not a steering command")
+    if not line:
+        raise ValueError("usage: /steer [lead|worker-N|verifier|all] <text> or /steer --fleet <text>")
+    return target, line, fleet
+
+
+def steer_data(root, mid, line):
+    """Append only operator-authored text; never include dashboard data in notes."""
+    target, message, fleet = parse_steer(line)
+    selected = [m for m in missions(root)
+                if not any(r.get("kind") == "mission_end"
+                           for r in rows(mission_dir(root, m) / "events.jsonl"))] if fleet else [mid]
+    sent = []
+    for mission in selected:
+        path = mission_dir(root, mission)
+        if path is None:
+            raise OSError("no focused mission directory")
+        row = {"t": time.time(), "by": "operator", "to": target, "text": message}
+        with (path / "operator_notes.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+        sent.append((mission, row))
+    return sent
+
+
+def note_deliveries(notes, events):
+    """FIFO matching: each acknowledgement consumes at most one earlier note.
+
+    The runner only logs the requested target, not individual recipients for all.
+    Text is deliberately never needed for matching.
+    """
+    statuses = ["queued"] * len(notes)
+    for event in events:
+        stamp = number(event.get("t"))
+        if event.get("kind") != "operator_note" or stamp is None:
+            continue
+        for i, note in enumerate(notes):
+            queued = number(note.get("t"))
+            if (statuses[i] == "queued" and queued is not None and stamp > queued
+                    and event.get("to") == note.get("to")):
+                statuses[i] = "delivered to " + str(event["to"])
+                break
+    return statuses
+
+
+def notes_data(root, mid, limit=20):
+    path = mission_dir(root, mid)
+    if path is None:
+        return []
+    notes = rows(path / "operator_notes.jsonl")
+    statuses = note_deliveries(notes, rows(path / "events.jsonl"))
+    return [dict(note, status=status) for note, status in zip(notes, statuses)][-limit:] if limit > 0 else []
+
+
+def notes_lines(root, mid):
+    return [REMOTE_NOTE_LAG] + [
+        f"{note.get('t')} to {text(note.get('to'))}: {text(note.get('text'))} [{note['status']}]"
+        for note in notes_data(root, mid)]
 
 
 def text(value):

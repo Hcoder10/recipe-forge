@@ -114,6 +114,11 @@ def t_bench(ctx, config_delta=None, env=None, bundle=None, n_prompts=None, fresh
     if "candidate" in out:
         res["candidate"] = _brief_measure(out["candidate"])
         res["delta_pct"] = out.get("delta_pct")
+        for k in ("confirmed", "delta_pct_vs_cached", "noise_pct", "verdict_hint", "reference_age_s"):
+            if out.get(k) is not None:
+                res[k] = out[k]
+        if out.get("reference_fresh"):
+            res["reference_fresh"] = _brief_measure(out["reference_fresh"])
     res["bench_id"] = m.record_bench(ctx.agent, {"config_delta": delta, "env": env, "bundle": bundle,
                                                  "claim": claim[:300], "predict_pct": predict_pct,
                                                  "result": res, "wall_s": round(time.time() - t0, 1)})
