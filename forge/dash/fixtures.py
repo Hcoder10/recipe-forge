@@ -222,19 +222,23 @@ def write(out: str, seed: int = 7, now: float | None = None) -> dict:
                       "claim": f"{FX} placeholder fact #{i + 1} about {rid}", "evidence": [f"b{i}"]})
     _wl(os.path.join(out, "brain", "facts.jsonl"), facts)
 
+    # Version N+1 in the mechanic's log format: proposed, then promote/reject with per-recipe paired scores
+    h = {k: f"{k}{rng.getrandbits(48):012x}" for k in ("pb0", "pb1", "pb2", "pb3")}
     _wl(os.path.join(out, "n1", "log.jsonl"), [
-        {"version": "v1", "t": now - 4 * 3600, "status": "promoted", "change_summary": f"{FX} initial playbook",
-         "missions": 0, "unseen": []},
-        {"version": "v2", "parent": "v1", "t": now - 2.5 * 3600, "status": "promoted",
-         "change_summary": f"{FX} playbook revision 2", "missions": 6, "paired_delta": 3.1,
-         "unseen": [{"recipe": "nano-9b-v2-c1", "before": 4.2, "after": 9.8},
-                    {"recipe": "nemotron3-nano-30b-a3b-c1", "before": 1.0, "after": 5.7}]},
-        {"version": "v3", "parent": "v2", "t": now - 1.2 * 3600, "status": "rejected",
-         "change_summary": f"{FX} playbook revision 3", "missions": 5, "paired_delta": -1.4,
-         "unseen": [{"recipe": "bolt-74b-a9b-tput", "before": 0.0, "after": -0.6},
-                    {"recipe": "lightning-30b-a3b-c1", "before": 2.4, "after": 0.9}]},
-        {"version": "v4", "parent": "v2", "t": now - 600, "status": "candidate",
-         "change_summary": f"{FX} playbook revision 4", "missions": 2, "unseen": []}])
+        {"t": now - 2.6 * 3600, "event": "proposed", "base": h["pb0"], "new": h["pb1"], "missions": ["m001", "m002"],
+         "rationale": f"{FX} playbook revision 1", "changed": ["protocol"]},
+        {"t": now - 2.5 * 3600, "event": "promote", "verdict": "promote", "old": h["pb0"], "new": h["pb1"],
+         "reason": f"{FX} mean paired delta +0.85 over 2 recipes", "pairs": 2, "mean_delta": 0.85,
+         "per_recipe": {"nano-9b-v2-c1": {"old": 1.5, "new": 3.2, "delta": 1.7},
+                        "nemotron3-nano-30b-a3b-c1": {"old": 2.1, "new": 2.1, "delta": 0.0}}},
+        {"t": now - 1.3 * 3600, "event": "proposed", "base": h["pb1"], "new": h["pb2"], "missions": ["m003"],
+         "rationale": f"{FX} playbook revision 2", "changed": ["knobs"]},
+        {"t": now - 1.2 * 3600, "event": "reject", "verdict": "reject", "old": h["pb1"], "new": h["pb2"],
+         "reason": f"{FX} mean paired delta -0.40", "pairs": 2, "mean_delta": -0.4,
+         "per_recipe": {"bolt-74b-a9b-tput": {"old": 1.0, "new": 0.5, "delta": -0.5},
+                        "lightning-30b-a3b-c1": {"old": 2.3, "new": 2.0, "delta": -0.3}}},
+        {"t": now - 600, "event": "proposed", "base": h["pb1"], "new": h["pb3"], "missions": ["m006", "m007"],
+         "rationale": f"{FX} playbook revision 3", "changed": ["manual_notes"]}])
     return {"out": out, "missions": len(finished) + len(live)}
 
 

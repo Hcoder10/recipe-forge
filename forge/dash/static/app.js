@@ -250,10 +250,10 @@ const VER_ICON = {
 function renderN1(s) {
   const vs = s.n1?.versions || [];
   if (!vs.length) { $("n1").innerHTML = empty("No playbook versions yet (n1/log.jsonl)."); return; }
-  const nodes = vs.map((v, i) => `<div class="ver"${tipAttr(v.summary || "")}>
+  const nodes = vs.map((v, i) => `<div class="ver"${tipAttr([v.summary, v.changed && "changed: " + v.changed, v.reason].filter(Boolean).join(" · "))}>
       ${i < vs.length - 1 ? '<div class="edge"></div>' : ""}
       <div class="node">${VER_ICON[v.status] || VER_ICON.candidate}<span>${esc(v.version)}</span></div>
-      <div class="vs ${esc(VER_ICON[v.status] ? v.status : "candidate")}">${esc(v.status)}${v.paired_delta != null ? ` · ${v.paired_delta >= 0 ? "+" : ""}${fmt(v.paired_delta, 1)} pts` : ""}${v.missions ? ` · ${esc(v.missions)} missions` : ""}</div>
+      <div class="vs ${esc(VER_ICON[v.status] ? v.status : "candidate")}">${esc(v.status)}${v.paired_delta != null ? ` · ${v.paired_delta >= 0 ? "+" : ""}${fmt(v.paired_delta, v.unit === "score" ? 2 : 1)}${v.unit === "score" ? "" : " pts"}` : ""}${v.missions ? ` · ${esc(v.missions)} missions` : ""}</div>
       <div class="vsum">${esc(v.summary)}</div></div>`).join("");
 
   // dumbbell: unseen-recipe delta % before (previous version) -> after (this version)
@@ -261,17 +261,18 @@ function renderN1(s) {
   for (const v of vs) for (const u of v.unseen || []) if (u.before != null || u.after != null) items.push({ v, u });
   let chart = '<div class="muted" style="font-size:.85em">No unseen-recipe comparisons yet.</div>';
   if (items.length) {
+    const pct = items.every(({ v }) => v.unit !== "score");
     const vals = items.flatMap(({ u }) => [u.before, u.after]).filter((x) => x != null);
     let lo = Math.min(0, ...vals), hi = Math.max(1, ...vals);
     const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
     const W = 600, L = 250, R = 16, rowH = 24, top = 6, H = top + items.length * rowH + 22;
     const x = (val) => L + ((val - lo) / (hi - lo)) * (W - L - R);
     const ticks = niceTicks(lo, hi, 5);
-    let g = ticks.map((t) => `<line class="${t === 0 ? "zero" : "grid"}" x1="${x(t)}" x2="${x(t)}" y1="${top - 2}" y2="${H - 18}"/><text class="ax" x="${x(t)}" y="${H - 4}" text-anchor="middle">${t > 0 ? "+" : ""}${t}%</text>`).join("");
+    let g = ticks.map((t) => `<line class="${t === 0 ? "zero" : "grid"}" x1="${x(t)}" x2="${x(t)}" y1="${top - 2}" y2="${H - 18}"/><text class="ax" x="${x(t)}" y="${H - 4}" text-anchor="middle">${t > 0 && pct ? "+" : ""}${t}${pct ? "%" : ""}</text>`).join("");
     items.forEach(({ v, u }, i) => {
       const y = top + i * rowH + rowH / 2;
       const col = v.status === "promoted" ? "var(--good)" : v.status === "rejected" ? "var(--critical)" : "var(--muted)";
-      const tip = `${v.version} (${v.status}) on ${u.recipe}: ${fmt(u.before, 1)}% → ${fmt(u.after, 1)}%`;
+      const tip = `${v.version} (${v.status}) on ${u.recipe}: ${fmt(u.before, pct ? 1 : 2)}${pct ? "%" : ""} → ${fmt(u.after, pct ? 1 : 2)}${pct ? "%" : ""}`;
       g += `<g${tipAttr(tip)}><rect x="0" y="${y - rowH / 2}" width="${W}" height="${rowH}" fill="transparent"/>
         <text x="${L - 10}" y="${y + 4}" text-anchor="end">${esc(v.version)} · ${esc(u.recipe)}</text>`;
       if (u.before != null && u.after != null) g += `<line class="link" x1="${x(u.before)}" x2="${x(u.after)}" y1="${y}" y2="${y}" stroke="${col}" stroke-opacity=".55"/>`;
@@ -282,7 +283,7 @@ function renderN1(s) {
     chart = `<svg class="dumb" viewBox="0 0 ${W} ${H}">${g}</svg>
       <div class="legend"><span><svg width="12" height="12" style="vertical-align:-1px;margin-right:.35em"><circle cx="6" cy="6" r="4.5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="2"/></svg>previous version</span>
       <span><span class="sw" style="background:var(--good);border-radius:50%"></span>promoted</span><span><span class="sw" style="background:var(--critical);border-radius:50%"></span>rejected</span>
-      <span class="muted">x: delta % vs NVIDIA baseline on recipes the version had not seen</span></div>`;
+      <span class="muted">${pct ? "x: delta % vs NVIDIA baseline" : "x: mission score"} on recipes the version had not seen</span></div>`;
   }
   $("n1").innerHTML = `<div class="versions">${nodes}</div>${chart}`;
 }

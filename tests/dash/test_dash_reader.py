@@ -45,7 +45,7 @@ def test_fixture_fills_every_panel(tmp_path):
     assert s["decisions"] and s["alerts"]
     assert {"agent", "infra"} <= {a["fault"] for a in s["alerts"]}
     assert s["brain"]["total"] == 30 and "measured" in s["brain"]["by_status"]
-    assert [v["status"] for v in s["n1"]["versions"]] == ["promoted", "promoted", "rejected", "candidate"]
+    assert [v["status"] for v in s["n1"]["versions"]] == ["promoted", "rejected", "candidate"]
     assert s["spend"]["crusoe"]["total"] > 0 and set(s["spend"]["crusoe"]["by_role"]) >= {"lead", "worker"}
     assert s["spend"]["vast"]["burn_usd_per_hr"] > 0 and len(s["spend"]["vast"]["machines"]) == 5
 
@@ -163,3 +163,20 @@ def test_gate_ledger_latest_row_per_gate(tmp_path):
     _append(led, {"gate_id": "g1", "status": "done", "verdict": "lossy", "t": 9})
     rig = {g["machine"]: g for g in r.snapshot()["gates"]}["rig"]
     assert rig["running"] is None and rig["verdicts"][0]["lossless"] is False
+
+
+def test_n1_mechanic_log(tmp_path):
+    log = str(tmp_path / "state" / "n1" / "log.jsonl")
+    _append(log,
+            {"t": 1, "event": "proposed", "base": "aaaa1111bbbb", "new": "cccc2222dddd", "missions": ["m1", "m2"],
+             "rationale": "why", "changed": ["knobs"]},
+            {"t": 2, "event": "no_change", "base": "cccc2222dddd", "missions": []},
+            {"t": 3, "event": "promote", "verdict": "promote", "reason": "mean paired delta +0.4", "old": "aaaa1111bbbb",
+             "new": "cccc2222dddd", "pairs": 3, "mean_delta": 0.4,
+             "per_recipe": {"r1": {"old": 1.0, "new": 1.5, "delta": 0.5}}},
+            {"t": 4, "event": "rejected_proposal", "base": "cccc2222dddd", "problems": ["leak"], "rationale": "x"})
+    vs = Reader(str(tmp_path)).snapshot()["n1"]["versions"]
+    assert [(v["version"], v["status"]) for v in vs] == [("cccc2222", "promoted"), ("proposal-3", "rejected")]
+    v = vs[0]
+    assert (v["parent"], v["paired_delta"], v["missions"], v["unit"], v["summary"]) == ("aaaa1111", 0.4, 2, "score", "why")
+    assert v["unseen"] == [{"recipe": "r1", "before": 1.0, "after": 1.5}]

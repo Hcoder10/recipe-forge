@@ -760,13 +760,17 @@ class Reader:
     def _n1(self) -> dict:
         recs = self._jsonl_many("n1", ["n1/log.jsonl", "n1/versions.jsonl", "results/n1/versions.jsonl"])
         latest: dict[str, dict] = {}
-        for r in recs:  # a version can get several lines (proposed, then compared); merge them
+        for i, r in enumerate(recs):  # a version can get several lines (proposed, then compared); merge them
+            event = str(r.get("event") or "")
+            if event == "no_change":
+                continue
             vid = _pick(r, "version", "new_hash", "new", "hash", "playbook", "id")
-            vid = str(vid if vid is not None else len(latest))
+            vid = str(vid if vid is not None else f"proposal-{i}")
             latest[vid] = {**latest.get(vid, {}), **{k: v for k, v in r.items() if v is not None}}
         out = []
         for vid, r in latest.items():
             unseen = []
+            unit = "score" if r.get("per_recipe") is not None and r.get("unseen") is None else "%"
             per = _pick(r, "unseen", "per_recipe", "heldout", "held_out", default=[]) or []
             if isinstance(per, dict):
                 per = [dict(v, recipe=k) if isinstance(v, dict) else {"recipe": k, "after": v} for k, v in per.items()]
@@ -775,15 +779,17 @@ class Reader:
                     unseen.append({"recipe": _pick(u, "recipe", "recipe_id"),
                                    "before": _num(_pick(u, "before", "old", "prev", "base")),
                                    "after": _num(_pick(u, "after", "new", "cand"))})
-            status = str(_pick(r, "status", "verdict", "decision", default="candidate")).lower()
+            status = str(_pick(r, "status", "verdict", "decision", "event", default="candidate")).lower()
             status = {"promote": "promoted", "reject": "rejected", "proposed": "candidate",
-                      "propose": "candidate"}.get(status, status)
+                      "propose": "candidate", "rejected_proposal": "rejected"}.get(status, status)
             label = vid if len(vid) <= 10 else vid[:8]
-            parent = _pick(r, "parent", "old_hash", "old", "prev")
+            parent = _pick(r, "parent", "old_hash", "old", "base", "prev")
             out.append({"version": label, "full": vid,
                         "parent": parent if not isinstance(parent, str) or len(parent) <= 10 else parent[:8],
                         "status": status,
-                        "summary": _short(_pick(r, "change_summary", "summary", "change", "reason"), 220),
+                        "summary": _short(_pick(r, "change_summary", "summary", "rationale", "change", "reason"), 220),
+                        "reason": _short(_pick(r, "reason", "problems"), 220), "unit": unit,
+                        "changed": _short(_pick(r, "changed"), 120),
                         "paired_delta": _num(_pick(r, "paired_delta", "delta", "mean_delta")),
                         "missions": _count(_pick(r, "n_missions", "missions")),
                         "unseen": unseen, "ts": _ts(_pick(r, "t", "ts", "time"))})
