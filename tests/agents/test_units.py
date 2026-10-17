@@ -208,3 +208,34 @@ def test_unknown_args_and_aliases():
     assert reg.dispatch(None, "worker", "read", {"path": "a", "limit": "40"})["lines"] == 40
     r = reg.dispatch(None, "worker", "read", {"path": "a", "bogus": 1})
     assert r["class"] == "agent_error" and "bogus" in r["error"]
+
+
+def test_remote_bench_classifies_failures(tmp_path):
+    from forge.tools.bench import RemoteBenchRunner
+    from forge.tools.executor import ExecResult
+
+    class Ex:
+        def __init__(self, out):
+            self.out = out
+
+        def workspace(self, mid):
+            return str(tmp_path)
+
+        def write_text(self, p, t):
+            pass
+
+        def run(self, *a, **k):
+            return ExecResult(0, "BENCH_RESULT " + json.dumps(self.out), "", 1.0)
+
+    class M:
+        id = "m"
+        python = "py"
+        bench_prompts = "p.jsonl"
+        recipe = {"model": "x", "serve": {"args": []}, "workload": {}}
+
+    with pytest.raises(EnvBlocked):
+        RemoteBenchRunner(Ex({"ok": False, "infra": True, "error": "boom"}), "/r", "py").run(M())
+    with pytest.raises(ToolError):
+        RemoteBenchRunner(Ex({"ok": False, "error": "bad flag"}), "/r", "py").run(M(), config_delta={"--x": 1})
+    ok = RemoteBenchRunner(Ex({"ok": True, "reference": {"value": 1}}), "/r", "py").run(M())
+    assert ok["reference"]["value"] == 1
