@@ -925,7 +925,8 @@ def build_leaderboard(recipes: list[dict], rows: list[dict], queue: list, missio
     table: dict[tuple[str, str], dict] = {}
 
     def cell(recipe: Any, gpu: Any) -> dict:
-        key = (str(recipe or "?"), str(gpu or "?"))
+        # the gate writes <recipe>:<variant>, the catalog and rows <recipe>.<variant>
+        key = (str(recipe or "?").replace(":", "."), str(gpu or "?"))
         if key not in table:
             table[key] = {"recipe": key[0], "gpu_class": key[1], "model": None, "metric": None,
                           "baseline_tok_s": None, "best_tok_s": None, "delta_pct": None, "change": None,

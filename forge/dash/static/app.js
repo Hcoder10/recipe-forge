@@ -93,7 +93,7 @@ function deltaBar(d, max) {
 }
 function renderLeaderboard(s) {
   const rows = s.leaderboard || [];
-  if (!rows.length) { $("leaderboard").innerHTML = empty("No recipes or rows yet. Waiting for forge/recipes and results/leaderboard.jsonl."); return; }
+  if (!rows.length) { $("leaderboard").innerHTML = empty("No recipes or rows yet. Waiting for forge/recipes and mission rows."); return; }
   const max = Math.max(5, ...rows.map((r) => Math.abs(r.delta_pct || 0)));
   const flash = new Set();
   const next = {};
@@ -249,7 +249,7 @@ const VER_ICON = {
 };
 function renderN1(s) {
   const vs = s.n1?.versions || [];
-  if (!vs.length) { $("n1").innerHTML = empty("No playbook versions yet (n1/versions.jsonl)."); return; }
+  if (!vs.length) { $("n1").innerHTML = empty("No playbook versions yet (n1/log.jsonl)."); return; }
   const nodes = vs.map((v, i) => `<div class="ver"${tipAttr(v.summary || "")}>
       ${i < vs.length - 1 ? '<div class="edge"></div>' : ""}
       <div class="node">${VER_ICON[v.status] || VER_ICON.candidate}<span>${esc(v.version)}</span></div>
@@ -340,7 +340,7 @@ function renderSpend(s) {
   const rmax = Math.max(1e-9, ...roles.map(([, x]) => x));
   const bars = roles.length ? roles.map(([r, x]) => `<div class="hbar"><span>${esc(r)}</span><div class="t"><div class="f" style="width:${((x / rmax) * 100).toFixed(1)}%;background:${ROLE_COLOR[r] || "var(--c7)"}"></div></div><span class="v">${usd(x)}</span></div>`).join("")
     : '<div class="muted" style="font-size:.85em">No calls yet.</div>';
-  const rent = (v.machines || []).map((m) => `<span class="dot ${m.active ? "on" : "idle"}"></span><span>${esc(m.machine)} <span class="muted">${esc(m.gpu_class || "")}</span></span>
+  const rent = (v.machines || []).map((m) => `<span class="dot ${m.active ? "on" : "idle"}"></span><span>${esc(m.machine)} <span class="muted">${esc(m.gpu_class ? gpuName(m.gpu_class) : "")}</span></span>
     <span class="r muted">${m.usd_per_hr != null ? usd(m.usd_per_hr) + "/h" : esc(m.status || "")}</span><span class="r">${usd(m.spent_usd)}</span>`).join("");
   $("spend").innerHTML = `<div class="tiles">
       <div class="tile"><div class="l">Crusoe inference</div><div class="v num">${usd(c.total)}</div><div class="s">${roles.length} roles</div></div>
